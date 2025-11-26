@@ -49,7 +49,7 @@ use radkit::agent::{Artifact, LlmFunction, OnRequestResult, SkillHandler};
 use radkit::errors::AgentResult;
 use radkit::macros::skill;
 use radkit::models::Content;
-use radkit::runtime::context::{Context, TaskContext};
+use radkit::runtime::context::{ProgressSender, State};
 use radkit::runtime::Runtime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -71,8 +71,8 @@ pub struct ProfileExtractorSkill;
 impl SkillHandler for ProfileExtractorSkill {
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        context: &Context,
+        state: &mut State,
+        progress: &ProgressSender,
         runtime: &dyn Runtime,
         content: Content,
     ) -> AgentResult<OnRequestResult> {

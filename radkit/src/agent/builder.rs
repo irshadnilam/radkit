@@ -1,7 +1,7 @@
 //! Agent builder and definition types.
 //!
 //! This module provides a fluent builder API for constructing agent definitions
-//! that can be deployed to the runtime. Agents are composed of metadata (id, name,
+//! that can be deployed to the runtime. Agents are composed of metadata (name,
 //! description) and registered skills.
 //!
 //! # Overview
@@ -17,7 +17,6 @@
 //! use radkit::agent::Agent;
 //!
 //! let agent = Agent::builder()
-//!     .with_id("weather-agent")
 //!     .with_name("Weather Assistant")
 //!     .with_description("Provides weather information")
 //!     .with_skill(MyForecastSkill)
@@ -26,7 +25,6 @@
 
 use crate::agent::skill::{RegisteredSkill, SkillHandler, SkillMetadata};
 use std::sync::Arc;
-use uuid::Uuid;
 
 const DEFAULT_AGENT_VERSION: &str = "0.0.1";
 
@@ -36,7 +34,6 @@ const DEFAULT_AGENT_VERSION: &str = "0.0.1";
 /// to deploy an agent to the runtime. Use [`Agent::builder()`] to construct
 /// agent definitions.
 pub struct AgentDefinition {
-    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) description: Option<String>,
@@ -74,7 +71,6 @@ impl Agent {
     ///
     /// ```ignore
     /// let agent = Agent::builder()
-    ///     .with_id("my-agent")
     ///     .with_name("My Agent")
     ///     .build();
     /// ```
@@ -82,7 +78,6 @@ impl Agent {
     pub fn builder() -> AgentBuilder {
         AgentBuilder {
             inner: AgentDefinition {
-                id: String::new(),
                 name: String::new(),
                 version: DEFAULT_AGENT_VERSION.to_string(),
                 description: None,
@@ -94,26 +89,6 @@ impl Agent {
 }
 
 impl AgentBuilder {
-    /// Sets the agent identifier.
-    ///
-    /// The ID uniquely identifies this agent within the runtime.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Unique identifier for the agent
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let builder = Agent::builder()
-    ///     .with_id("weather-agent");
-    /// ```
-    #[must_use]
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.inner.id = id.into();
-        self
-    }
-
     /// Sets the agent display name.
     ///
     /// The name is used for display purposes and logging.
@@ -209,15 +184,11 @@ impl AgentBuilder {
     ///
     /// ```ignore
     /// let agent = Agent::builder()
-    ///     .with_id("my-agent")
     ///     .with_name("My Agent")
     ///     .build();
     /// ```
     #[must_use]
     pub fn build(mut self) -> AgentDefinition {
-        if self.inner.id.is_empty() {
-            self.inner.id = Uuid::new_v4().to_string();
-        }
         if self.inner.version.trim().is_empty() {
             self.inner.version = DEFAULT_AGENT_VERSION.to_string();
         }
@@ -226,18 +197,6 @@ impl AgentBuilder {
 }
 
 impl AgentDefinition {
-    /// Returns the agent identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// println!("Agent ID: {}", agent.id());
-    /// ```
-    #[must_use]
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
     /// Returns the agent name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -315,10 +274,9 @@ mod tests {
     use crate::models::Content;
 
     #[test]
-    fn build_generates_id_and_applies_defaults() {
+    fn build_applies_defaults() {
         let agent = Agent::builder().with_name("Test").build();
 
-        assert!(!agent.id().is_empty(), "expected builder to generate an id");
         assert_eq!(agent.name(), "Test");
         assert_eq!(agent.version(), DEFAULT_AGENT_VERSION);
         assert!(agent.description().is_none());
@@ -329,7 +287,6 @@ mod tests {
     #[test]
     fn build_preserves_all_fields() {
         let agent = Agent::builder()
-            .with_id("custom-id")
             .with_name("Custom Agent")
             .with_version("1.2.3")
             .with_description("A helpful description")
@@ -337,7 +294,6 @@ mod tests {
             .with_skill(DummySkill)
             .build();
 
-        assert_eq!(agent.id(), "custom-id");
         assert_eq!(agent.name(), "Custom Agent");
         assert_eq!(agent.version(), "1.2.3");
         assert_eq!(agent.description(), Some("A helpful description"));
@@ -385,8 +341,8 @@ mod tests {
     impl SkillHandler for DummySkill {
         async fn on_request(
             &self,
-            _task_context: &mut crate::runtime::context::TaskContext,
-            _context: &crate::runtime::context::Context,
+            _state: &mut crate::runtime::context::State,
+            _progress: &crate::runtime::context::ProgressSender,
             _runtime: &dyn crate::runtime::AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {
@@ -398,8 +354,8 @@ mod tests {
 
         async fn on_input_received(
             &self,
-            _task_context: &mut crate::runtime::context::TaskContext,
-            _context: &crate::runtime::context::Context,
+            _state: &mut crate::runtime::context::State,
+            _progress: &crate::runtime::context::ProgressSender,
             _runtime: &dyn crate::runtime::AgentRuntime,
             _content: Content,
         ) -> Result<OnInputResult, AgentError> {
@@ -439,8 +395,8 @@ mod tests {
     impl SkillHandler for SecondarySkill {
         async fn on_request(
             &self,
-            _task_context: &mut crate::runtime::context::TaskContext,
-            _context: &crate::runtime::context::Context,
+            _state: &mut crate::runtime::context::State,
+            _progress: &crate::runtime::context::ProgressSender,
             _runtime: &dyn crate::runtime::AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {

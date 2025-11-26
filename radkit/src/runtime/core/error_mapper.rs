@@ -14,9 +14,8 @@ use serde_json::json;
 #[must_use]
 pub fn to_jsonrpc_error(error: AgentError) -> JSONRPCError {
     use AgentError::{
-        AgentNotFound, BlockingNotSupported, InvalidConfiguration, InvalidInput,
-        MissingConfiguration, MissingInput, NotImplemented, SkillNotFound, SkillSlot, TaskNotFound,
-        Validation,
+        BlockingNotSupported, InvalidConfiguration, InvalidInput, MissingConfiguration,
+        MissingInput, NotImplemented, SkillNotFound, SkillSlot, TaskNotFound, Validation,
     };
 
     match error {
@@ -30,10 +29,6 @@ pub fn to_jsonrpc_error(error: AgentError) -> JSONRPCError {
         SkillNotFound { skill_id } => invalid_params_error(
             Some(format!("Skill not found: {skill_id}")),
             Some(json!({ "skillId": skill_id })),
-        ),
-        AgentNotFound { agent_id } => invalid_request_error(
-            Some(format!("Agent not found: {agent_id}")),
-            Some(json!({ "agentId": agent_id })),
         ),
         NotImplemented { feature } => unsupported_operation_error(
             Some(format!("Feature not implemented: {feature}")),
@@ -122,15 +117,6 @@ mod tests {
         let err = to_jsonrpc_error(AgentError::InvalidInput("bad".into()));
         assert_eq!(err.code, InvalidParamsError::default().code);
         assert!(err.message.contains("bad"));
-    }
-
-    #[test]
-    fn agent_not_found_maps_to_invalid_request() {
-        let err = to_jsonrpc_error(AgentError::AgentNotFound {
-            agent_id: "missing".into(),
-        });
-        assert_eq!(err.code, InvalidRequestError::default().code);
-        assert!(err.message.contains("missing"));
     }
 
     #[test]

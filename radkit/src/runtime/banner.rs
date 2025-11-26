@@ -50,15 +50,11 @@ pub fn display_banner(address: &str, base_url: Option<&str>, agent: &AgentDefini
 
     println!();
 
-    println!("Agents Loaded: 1");
-    println!();
-
-    let agent_id = agent.id();
     let version = agent.version();
     let skill_count = agent.skills().len();
 
+    println!("Agent:");
     println!("  \u{2022} {} (v{})", agent.name(), version);
-    println!("    ID:          {agent_id}");
     println!("    Skills:      {skill_count}");
     println!("    Agent Card:  {normalized_base}/.well-known/agent-card.json");
     println!("    RPC:         {normalized_base}/rpc");

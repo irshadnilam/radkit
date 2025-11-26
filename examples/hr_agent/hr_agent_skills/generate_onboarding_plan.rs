@@ -6,7 +6,7 @@ use radkit::errors::AgentError;
 use radkit::macros::skill;
 use radkit::models::providers::OpenRouterLlm;
 use radkit::models::Content;
-use radkit::runtime::context::{Context, TaskContext};
+use radkit::runtime::context::{ProgressSender, State};
 use radkit::runtime::{AgentRuntime, MemoryServiceExt};
 
 fn generate_onboarding_tasks() -> LlmFunction<Vec<String>> {
@@ -42,28 +42,23 @@ pub struct GenerateOnboardingPlanSkill;
 impl SkillHandler for GenerateOnboardingPlanSkill {
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        context: &Context,
+        state: &mut State,
+        progress: &ProgressSender,
         runtime: &dyn AgentRuntime,
         _content: Content,
     ) -> Result<OnRequestResult, AgentError> {
         // Send intermediate update
-        task_context
-            .send_intermediate_update("Looking for user profile...")
-            .await?;
+        progress.send_update("Looking for user profile...").await?;
 
-        // Try to load user data from memory (saved by previous skill)
-        let user_data: Option<UserData> = runtime.memory().load(&context.auth, "user_data").await?;
+        // Load user data from session state (saved by previous skill in same session)
+        let user_data: Option<UserData> = state.session().load("user_data")?;
 
         if let Some(user_data) = user_data {
             let role = "Software Engineer"; // Placeholder - could be extracted from context
 
             // Send intermediate update
-            task_context
-                .send_intermediate_update(format!(
-                    "Generating onboarding tasks for {} role...",
-                    role
-                ))
+            progress
+                .send_update(format!("Generating onboarding tasks for {} role...", role))
                 .await?;
 
             let tasks = generate_onboarding_tasks().run(role).await?;

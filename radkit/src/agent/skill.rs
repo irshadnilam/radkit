@@ -16,6 +16,8 @@
 //!
 //! ```ignore
 //! use radkit::agent::{SkillHandler, OnRequestResult, Artifact};
+//! use radkit::runtime::context::{State, ProgressSender};
+//! use radkit::runtime::AgentRuntime;
 //! use radkit::errors::AgentResult;
 //!
 //! struct WeatherSkill;
@@ -24,11 +26,17 @@
 //! impl SkillHandler for WeatherSkill {
 //!     async fn on_request(
 //!         &self,
-//!         task_context: &mut TaskContext,
-//!         context: &Context,
-//!         runtime: &dyn Runtime,
+//!         state: &mut State,
+//!         progress: &ProgressSender,
+//!         runtime: &dyn AgentRuntime,
 //!         content: Content,
 //!     ) -> AgentResult<OnRequestResult> {
+//!         // Access current user
+//!         let user = runtime.current_user();
+//!
+//!         // Stream progress updates
+//!         progress.send_update("Fetching weather...").await?;
+//!
 //!         let artifact = Artifact::from_json("forecast.json", &weather_data)?;
 //!         Ok(OnRequestResult::Completed {
 //!             message: Some(Content::from_text("Weather retrieved")),
@@ -41,7 +49,7 @@
 use crate::compat::{MaybeSend, MaybeSync};
 use crate::errors::AgentError;
 use crate::models::Content;
-use crate::runtime::context::{Context, TaskContext};
+use crate::runtime::context::{ProgressSender, State};
 use crate::runtime::AgentRuntime;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -354,12 +362,23 @@ pub enum OnInputResult {
 /// impl SkillHandler for MySkill {
 ///     async fn on_request(
 ///         &self,
-///         task_context: &mut TaskContext,
-///         context: &Context,
-///         runtime: &dyn Runtime,
+///         state: &mut State,
+///         progress: &ProgressSender,
+///         runtime: &dyn AgentRuntime,
 ///         content: Content,
 ///     ) -> AgentResult<OnRequestResult> {
-///         // Implementation here
+///         // Task-scoped state (for multi-turn within this skill)
+///         state.task().save("partial", &data)?;
+///
+///         // Session-scoped state (shared across skills)
+///         state.session().save("user_data", &user_data)?;
+///
+///         // Streaming updates
+///         progress.send_update("Processing...").await?;
+///
+///         // Get current user
+///         let user = runtime.current_user();
+///
 ///         Ok(OnRequestResult::Completed {
 ///             message: Some(Content::from_text("Done")),
 ///             artifacts: vec![],
@@ -384,9 +403,9 @@ pub trait SkillHandler: MaybeSend + MaybeSync {
     ///
     /// # Arguments
     ///
-    /// * `task_context` - Mutable context for persisting state
-    /// * `context` - Immutable execution context
-    /// * `runtime` - Runtime services
+    /// * `state` - Mutable state container with task and session scopes
+    /// * `progress` - Sender for streaming updates to the client
+    /// * `runtime` - Runtime services (use `runtime.current_user()` for auth)
     /// * `content` - Input content from the user
     ///
     /// # Errors
@@ -394,8 +413,8 @@ pub trait SkillHandler: MaybeSend + MaybeSync {
     /// Returns error if skill execution fails in an unexpected way.
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        context: &Context,
+        state: &mut State,
+        progress: &ProgressSender,
         runtime: &dyn AgentRuntime,
         content: Content,
     ) -> Result<OnRequestResult, AgentError>;
@@ -409,9 +428,9 @@ pub trait SkillHandler: MaybeSend + MaybeSync {
     ///
     /// # Arguments
     ///
-    /// * `task_context` - Mutable context with saved state
-    /// * `context` - Immutable execution context
-    /// * `runtime` - Runtime services
+    /// * `state` - Mutable state container with saved data
+    /// * `progress` - Sender for streaming updates to the client
+    /// * `runtime` - Runtime services (use `runtime.current_user()` for auth)
     /// * `content` - New input content from the user
     ///
     /// # Errors
@@ -419,8 +438,8 @@ pub trait SkillHandler: MaybeSend + MaybeSync {
     /// Returns error if input processing fails in an unexpected way.
     async fn on_input_received(
         &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         _content: Content,
     ) -> Result<OnInputResult, AgentError> {

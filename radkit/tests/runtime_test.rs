@@ -10,10 +10,7 @@ use radkit::runtime::{AgentRuntime, ListTasksFilter, LogLevel, MemoryServiceExt,
 use radkit::test_support::FakeLlm;
 
 fn test_agent() -> radkit::agent::AgentDefinition {
-    Agent::builder()
-        .with_id("test-agent")
-        .with_name("Test Agent")
-        .build()
+    Agent::builder().with_name("Test Agent").build()
 }
 
 fn runtime_with_manager(llm: FakeLlm) -> Runtime {

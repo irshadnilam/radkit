@@ -170,23 +170,21 @@ impl TaskManager for DefaultTaskManager {
         Ok(contexts.into_iter().collect())
     }
 
-    async fn save_task_context(
+    async fn save_task_state(
         &self,
         auth_ctx: &AuthContext,
         task_id: &str,
-        context: &crate::runtime::context::TaskContext,
+        state: &crate::runtime::context::TaskState,
     ) -> AgentResult<()> {
-        self.store
-            .save_task_context(auth_ctx, task_id, context)
-            .await
+        self.store.save_task_state(auth_ctx, task_id, state).await
     }
 
-    async fn load_task_context(
+    async fn load_task_state(
         &self,
         auth_ctx: &AuthContext,
         task_id: &str,
-    ) -> AgentResult<Option<crate::runtime::context::TaskContext>> {
-        self.store.load_task_context(auth_ctx, task_id).await
+    ) -> AgentResult<Option<crate::runtime::context::TaskState>> {
+        self.store.load_task_state(auth_ctx, task_id).await
     }
 
     async fn set_task_skill(
@@ -204,5 +202,24 @@ impl TaskManager for DefaultTaskManager {
         task_id: &str,
     ) -> AgentResult<Option<String>> {
         self.store.get_task_skill(auth_ctx, task_id).await
+    }
+
+    async fn save_session_state(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+        state: &crate::runtime::context::SessionState,
+    ) -> AgentResult<()> {
+        self.store
+            .save_session_state(auth_ctx, context_id, state)
+            .await
+    }
+
+    async fn load_session_state(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+    ) -> AgentResult<Option<crate::runtime::context::SessionState>> {
+        self.store.load_session_state(auth_ctx, context_id).await
     }
 }

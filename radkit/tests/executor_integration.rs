@@ -17,7 +17,7 @@ mod tests {
     };
     use radkit::errors::AgentError;
     use radkit::models::{Content, LlmResponse, TokenUsage};
-    use radkit::runtime::context::{Context, TaskContext};
+    use radkit::runtime::context::{ProgressSender, State};
     use radkit::runtime::core::executor::{ExecutorRuntime, RequestExecutor};
     use radkit::runtime::{AgentRuntime, Runtime};
     use radkit::test_support::FakeLlm;
@@ -83,8 +83,8 @@ mod tests {
     impl SkillHandler for ImmediateSkill {
         async fn on_request(
             &self,
-            _task_context: &mut TaskContext,
-            _context: &Context,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {
@@ -96,8 +96,8 @@ mod tests {
 
         async fn on_input_received(
             &self,
-            _task_context: &mut TaskContext,
-            _context: &Context,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _input: Content,
         ) -> Result<OnInputResult, AgentError> {
@@ -177,8 +177,8 @@ mod tests {
     impl SkillHandler for GreetingSkill {
         async fn on_request(
             &self,
-            _task_context: &mut TaskContext,
-            _context: &Context,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {
@@ -190,12 +190,12 @@ mod tests {
 
         async fn on_input_received(
             &self,
-            task_context: &mut TaskContext,
-            _context: &Context,
+            state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             input: Content,
         ) -> Result<OnInputResult, AgentError> {
-            let slot: GreetingSlot = task_context.load_slot()?.expect("slot should be available");
+            let slot: GreetingSlot = state.slot()?.expect("slot should be available");
 
             match slot {
                 GreetingSlot::AwaitingName => {
@@ -295,8 +295,8 @@ mod tests {
     impl SkillHandler for FailingSkill {
         async fn on_request(
             &self,
-            _task_context: &mut TaskContext,
-            _context: &Context,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {
@@ -308,8 +308,8 @@ mod tests {
 
         async fn on_input_received(
             &self,
-            _task_context: &mut TaskContext,
-            _context: &Context,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _input: Content,
         ) -> Result<OnInputResult, AgentError> {

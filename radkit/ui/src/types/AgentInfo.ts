@@ -8,10 +8,6 @@
  */
 export type AgentInfo = { 
 /**
- * Unique identifier for this agent
- */
-id: string, 
-/**
  * Human-readable agent name
  */
 name: string, 

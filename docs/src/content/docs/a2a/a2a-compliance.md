@@ -17,7 +17,7 @@ For `on_request`:
 ```rust
 pub enum OnRequestResult {
     // Maps to A2A TaskState::InputRequired
-    InputRequired { message: Content, slot: SkillSlot },
+    InputRequired { message: Content },
     // Maps to A2A TaskState::Completed
     Completed { message: Option<Content>, artifacts: Vec<Artifact> },
     // Maps to A2A TaskState::Failed
@@ -27,21 +27,23 @@ pub enum OnRequestResult {
 }
 ```
 
+Note: To track which slot you're waiting for, use `state.set_slot()` before returning `InputRequired`.
+
 **Guarantee:** It is impossible for you to return an invalid task state. You cannot, for example, accidentally return a state of "Done" or "Error". The compiler forces you to choose from one of the valid, A2A-defined terminal states.
 
 ## 2. Constrained Intermediate Updates
 
-When you send a progress update during a task, you use the `TaskContext`:
+When you send a progress update during a task, you use the `ProgressSender`:
 
 ```rust
 // Always maps to an A2A TaskStatusUpdateEvent with state=working and final=false
-task_context.send_intermediate_update("Processing...").await?;
+progress.send_update("Processing...").await?;
 
 // Always maps to an A2A TaskArtifactUpdateEvent
-task_context.send_partial_artifact(artifact).await?;
+progress.send_artifact(artifact).await?;
 ```
 
-**Guarantee:** The methods on `TaskContext` are carefully designed to prevent protocol violations. You cannot accidentally mark an intermediate update as "final" or send a "completed" status mid-execution. The API only allows you to send valid, non-terminal updates.
+**Guarantee:** The methods on `ProgressSender` are carefully designed to prevent protocol violations. You cannot accidentally mark an intermediate update as "final" or send a "completed" status mid-execution. The API only allows you to send valid, non-terminal updates.
 
 ## 3. Automatic Metadata Generation
 

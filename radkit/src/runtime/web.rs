@@ -170,7 +170,7 @@ mod tests {
         };
         use crate::errors::{AgentError, AgentResult};
         use crate::models::{Content, LlmResponse};
-        use crate::runtime::context::{Context, TaskContext};
+        use crate::runtime::context::{ProgressSender, State as SkillState};
         use crate::runtime::{AgentRuntime, RuntimeBuilder};
         use crate::test_support::FakeLlm;
         use a2a_types::{
@@ -246,8 +246,8 @@ mod tests {
         impl SkillHandler for ImmediateSkill {
             async fn on_request(
                 &self,
-                _task_context: &mut TaskContext,
-                _context: &Context,
+                _state: &mut SkillState,
+                _progress: &ProgressSender,
                 _runtime: &dyn AgentRuntime,
                 _content: Content,
             ) -> Result<OnRequestResult, AgentError> {
@@ -259,8 +259,8 @@ mod tests {
 
             async fn on_input_received(
                 &self,
-                _task_context: &mut TaskContext,
-                _context: &Context,
+                _state: &mut SkillState,
+                _progress: &ProgressSender,
                 _runtime: &dyn AgentRuntime,
                 _input: Content,
             ) -> Result<OnInputResult, AgentError> {
@@ -279,7 +279,6 @@ mod tests {
             let llm =
                 FakeLlm::with_responses("fake-llm", [negotiation_response(IMMEDIATE_METADATA.id)]);
             let agent = Agent::builder()
-                .with_id("agent-1")
                 .with_version("1.0.0")
                 .with_name("Test Agent")
                 .with_skill(ImmediateSkill)
@@ -308,7 +307,6 @@ mod tests {
             let llm =
                 FakeLlm::with_responses("fake-llm", [negotiation_response(IMMEDIATE_METADATA.id)]);
             let agent = Agent::builder()
-                .with_id("agent-1")
                 .with_version("1.0.0")
                 .with_name("Test Agent")
                 .with_skill(ImmediateSkill)
@@ -359,7 +357,6 @@ mod tests {
             let llm =
                 FakeLlm::with_responses("fake-llm", [negotiation_response(IMMEDIATE_METADATA.id)]);
             let agent = Agent::builder()
-                .with_id("agent-1")
                 .with_version("1.0.0")
                 .with_name("Test Agent")
                 .with_skill(ImmediateSkill)
@@ -426,7 +423,6 @@ mod tests {
             let llm =
                 FakeLlm::with_responses("fake-llm", [negotiation_response(IMMEDIATE_METADATA.id)]);
             let agent = Agent::builder()
-                .with_id("agent-1")
                 .with_version("1.0.0")
                 .with_name("Test Agent")
                 .with_skill(ImmediateSkill)
@@ -465,7 +461,6 @@ mod tests {
 
             let llm = FakeLlm::with_responses("fake-llm", std::iter::empty());
             let agent = Agent::builder()
-                .with_id("agent-1")
                 .with_version("1.0.0")
                 .with_name("Test Agent")
                 .with_skill(ImmediateSkill)
@@ -911,8 +906,6 @@ fn convert_task_event(event: TaskEvent) -> (SendStreamingMessageResult, bool) {
 #[derive(serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../ui/src/types/")]
 pub struct AgentInfo {
-    /// Unique identifier for this agent
-    pub id: String,
     /// Human-readable agent name
     pub name: String,
     /// Agent version string
@@ -929,7 +922,6 @@ impl AgentInfo {
     /// Create an `AgentInfo` from an `AgentDefinition`
     fn from_agent_definition(agent: &crate::agent::AgentDefinition) -> Self {
         Self {
-            id: agent.id().to_string(),
             name: agent.name().to_string(),
             version: agent.version().to_string(),
             description: agent.description().map(String::from),
@@ -1101,10 +1093,11 @@ async fn fetch_context_tasks(
                 .await?;
             let pending_slot = runtime
                 .task_manager()
-                .load_task_context(&auth_ctx, &task_id)
+                .load_task_state(&auth_ctx, &task_id)
                 .await?
-                .and_then(|ctx| {
-                    ctx.current_slot()
+                .and_then(|state| {
+                    state
+                        .current_slot()
                         .and_then(|slot| slot.deserialize::<serde_json::Value>().ok())
                 });
 

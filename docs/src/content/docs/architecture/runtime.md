@@ -54,7 +54,6 @@ use radkit::runtime::Runtime;
 
 # fn configure_agent() -> radkit::agent::AgentDefinition {
 #     radkit::agent::Agent::builder()
-#         .with_id("hr-agent")
 #         .with_name("HR Agent")
 #         .build()
 # }

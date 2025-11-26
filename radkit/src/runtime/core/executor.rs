@@ -11,10 +11,9 @@
 //! - UI hints for clients about what to collect
 //! - Type-safe multi-turn conversations
 //!
-//! Currently, `SkillSlot` is a stub implementation. When it's fully implemented,
-//! slot data will be stored in `TaskContext` under the reserved key `__radkit_current_slot`.
-//! This approach reuses the existing `TaskContext` persistence mechanism rather than
-//! adding separate storage.
+//! Skill state (slots and multi-turn data) is stored in `TaskState` and persisted
+//! through the `TaskManager`. Session state for cross-skill data sharing is stored
+//! in `SessionState` and scoped to the `context_id`.
 //!
 //! **Future implementation:**
 //! ```rust,ignore
@@ -28,13 +27,13 @@
 //! ```
 
 use crate::agent::{
-    builder::SkillRegistration, skill::SkillHandler, AgentDefinition, OnInputResult,
-    OnRequestResult,
+    builder::SkillRegistration, skill::SkillHandler, AgentDefinition, Artifact, OnInputResult,
+    OnRequestResult, SkillSlot,
 };
 use crate::compat;
 use crate::errors::{AgentError, AgentResult};
 use crate::models::{utils, Content, Role};
-use crate::runtime::context::{AuthContext, Context, TaskContext};
+use crate::runtime::context::{AuthContext, ProgressSender, State, TaskState};
 use crate::runtime::core::{
     negotiator::{NegotiationDecision, Negotiator},
     status_mapper, TaskEventBus, TaskEventReceiver,
@@ -60,10 +59,84 @@ pub struct RequestExecutor {
 /// Buffered task events plus optional event-bus subscription used to power
 /// the `message/stream` and `tasks/resubscribe` SSE responses defined in the
 /// A2A specification (§7.2 and §7.10 respectively).
+#[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct TaskStream {
     pub(crate) initial_events: Vec<TaskEvent>,
     pub(crate) receiver: Option<TaskEventReceiver>,
+}
+
+/// Shared event writer to keep persistence + publish ordering consistent.
+#[derive(Clone)]
+struct TaskEventWriter {
+    task_manager: Arc<dyn TaskManager>,
+    event_bus: Arc<TaskEventBus>,
+}
+
+impl TaskEventWriter {
+    fn new(runtime: &Arc<dyn ExecutorRuntime>) -> Self {
+        Self {
+            task_manager: runtime.task_manager(),
+            event_bus: runtime.event_bus(),
+        }
+    }
+
+    async fn push(&self, auth_ctx: &AuthContext, event: TaskEvent) -> AgentResult<()> {
+        self.task_manager.add_task_event(auth_ctx, &event).await?;
+        self.event_bus.publish(&event);
+        Ok(())
+    }
+
+    async fn message(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+        task_id: Option<&str>,
+        role: Role,
+        content: Content,
+    ) -> AgentResult<a2a_types::Message> {
+        let message = utils::create_a2a_message(Some(context_id), task_id, role, content);
+        self.push(auth_ctx, TaskEvent::Message(message.clone()))
+            .await?;
+        Ok(message)
+    }
+
+    async fn status(
+        &self,
+        auth_ctx: &AuthContext,
+        task_id: &str,
+        context_id: &str,
+        final_status: a2a_types::TaskStatus,
+        is_final: bool,
+    ) -> AgentResult<()> {
+        let status_event =
+            status_mapper::create_status_update_event(task_id, context_id, final_status, is_final);
+        self.push(auth_ctx, TaskEvent::StatusUpdate(status_event))
+            .await
+    }
+
+    async fn artifacts(
+        &self,
+        auth_ctx: &AuthContext,
+        task_id: &str,
+        context_id: &str,
+        artifacts: &[Artifact],
+    ) -> AgentResult<()> {
+        for artifact in artifacts {
+            let event = a2a_types::TaskArtifactUpdateEvent {
+                kind: a2a_types::ARTIFACT_UPDATE_KIND.to_string(),
+                task_id: task_id.to_string(),
+                context_id: context_id.to_string(),
+                artifact: utils::artifact_to_a2a(artifact),
+                append: None,
+                last_chunk: Some(true),
+                metadata: None,
+            };
+            self.push(auth_ctx, TaskEvent::ArtifactUpdate(event))
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -82,12 +155,14 @@ impl TaskIdentifiers {
     }
 }
 
+#[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) enum PreparedSendMessage {
     Task(TaskStream),
     Message(a2a_types::Message),
 }
 
+#[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
 #[derive(Copy, Clone, Debug)]
 enum DeliveryMode {
     /// Blocking delivery corresponds to the `message/send` RPC defined in the
@@ -100,6 +175,7 @@ enum DeliveryMode {
 
 /// Internal routing outcome used to keep the synchronous (`message/send`) and
 /// streaming (`message/stream`) flows aligned with the negotiation/task logic.
+#[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
 #[derive(Debug)]
 enum DeliveryOutcome {
     Task(a2a_types::Task),
@@ -114,6 +190,69 @@ enum MessageRoute {
     ExistingTask { context_id: String, task_id: String },
     ExistingContext { context_id: String },
     NewContext,
+}
+
+#[derive(Debug)]
+enum ExecutionPhase {
+    Initial(Content),
+    Input(Content),
+}
+
+#[derive(Debug)]
+enum ExecutionResult {
+    Initial(OnRequestResult),
+    Input(OnInputResult),
+}
+
+struct InitializedTask {
+    task: Task,
+    handler: Arc<dyn SkillHandler>,
+    task_state: TaskState,
+    identifiers: TaskIdentifiers,
+}
+
+struct PreparedContinuation {
+    task: Task,
+    task_state: TaskState,
+    handler: Arc<dyn SkillHandler>,
+    identifiers: TaskIdentifiers,
+}
+
+impl ExecutionResult {
+    fn status(&self) -> a2a_types::TaskStatus {
+        match self {
+            Self::Initial(result) => status_mapper::on_request_to_status(result),
+            Self::Input(result) => status_mapper::on_input_to_status(result),
+        }
+    }
+
+    const fn message_content(&self) -> Option<&Content> {
+        match self {
+            Self::Initial(OnRequestResult::Completed { message, .. })
+            | Self::Input(OnInputResult::Completed { message, .. }) => message.as_ref(),
+            Self::Initial(OnRequestResult::InputRequired { message, .. })
+            | Self::Input(OnInputResult::InputRequired { message, .. }) => Some(message),
+            Self::Initial(OnRequestResult::Failed { error })
+            | Self::Input(OnInputResult::Failed { error }) => Some(error),
+            Self::Initial(OnRequestResult::Rejected { reason }) => Some(reason),
+        }
+    }
+
+    const fn slot(&self) -> Option<&SkillSlot> {
+        match self {
+            Self::Initial(OnRequestResult::InputRequired { slot, .. })
+            | Self::Input(OnInputResult::InputRequired { slot, .. }) => Some(slot),
+            _ => None,
+        }
+    }
+
+    fn artifacts(&self) -> Option<&[Artifact]> {
+        match self {
+            Self::Initial(OnRequestResult::Completed { artifacts, .. })
+            | Self::Input(OnInputResult::Completed { artifacts, .. }) => Some(artifacts),
+            _ => None,
+        }
+    }
 }
 
 impl MessageRoute {
@@ -144,6 +283,7 @@ impl RequestExecutor {
         Self { runtime }
     }
 
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     /// Handles a message send request and returns the result.
     ///
     /// # Errors
@@ -156,6 +296,7 @@ impl RequestExecutor {
         self.handle_send_message_internal(params).await
     }
 
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     pub(crate) async fn handle_message_stream(
         &self,
         params: MessageSendParams,
@@ -163,6 +304,7 @@ impl RequestExecutor {
         self.handle_message_stream_internal(params).await
     }
 
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     async fn handle_send_message_internal(
         &self,
         params: MessageSendParams,
@@ -180,6 +322,7 @@ impl RequestExecutor {
         }
     }
 
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     async fn handle_message_stream_internal(
         &self,
         params: MessageSendParams,
@@ -361,6 +504,7 @@ impl RequestExecutor {
             .await
     }
 
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     pub(crate) async fn handle_task_resubscribe(
         &self,
         params: TaskIdParams,
@@ -371,6 +515,7 @@ impl RequestExecutor {
     /// Implements `tasks/resubscribe` (§7.10) by replaying the persisted event
     /// log and, if the task is still running, wiring up a fresh subscription
     /// to future `TaskEvent`s.
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     async fn handle_task_resubscribe_internal(
         &self,
         params: TaskIdParams,
@@ -459,6 +604,96 @@ impl RequestExecutor {
     // Helper Methods
     // ========================================================================
 
+    async fn initialize_new_task(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+        skill_id: &str,
+        initial_message: Content,
+    ) -> AgentResult<InitializedTask> {
+        let task_id = Uuid::new_v4().to_string();
+        let skill_reg = self.find_skill_by_id(skill_id)?;
+
+        let task = Task {
+            id: task_id.clone(),
+            context_id: context_id.to_string(),
+            status: status_mapper::working_status(),
+            artifacts: vec![],
+        };
+
+        self.runtime
+            .task_manager()
+            .save_task(auth_ctx, &task)
+            .await?;
+
+        self.runtime
+            .task_manager()
+            .set_task_skill(auth_ctx, &task_id, skill_id)
+            .await?;
+
+        let writer = TaskEventWriter::new(&self.runtime);
+        writer
+            .message(
+                auth_ctx,
+                context_id,
+                Some(&task_id),
+                Role::User,
+                initial_message.clone(),
+            )
+            .await?;
+
+        Ok(InitializedTask {
+            task,
+            handler: skill_reg.handler_arc(),
+            task_state: TaskState::new(),
+            identifiers: TaskIdentifiers::new(context_id.to_string(), task_id),
+        })
+    }
+
+    async fn prepare_task_for_continuation(
+        &self,
+        auth_ctx: &AuthContext,
+        mut task: Task,
+    ) -> AgentResult<PreparedContinuation> {
+        if !status_mapper::can_continue(&task.status.state) {
+            return Err(AgentError::InvalidTaskStateTransition {
+                from: format!("{:?}", task.status.state),
+                to: "continuation".to_string(),
+            });
+        }
+
+        let skill_id = self
+            .runtime
+            .task_manager()
+            .get_task_skill(auth_ctx, &task.id)
+            .await?
+            .ok_or_else(|| AgentError::Internal {
+                component: "task_manager".to_string(),
+                reason: format!("No skill associated with task {}", task.id),
+            })?;
+        let skill_reg = self.find_skill_by_id(&skill_id)?;
+
+        let task_state = self
+            .runtime
+            .task_manager()
+            .load_task_state(auth_ctx, &task.id)
+            .await?
+            .unwrap_or_default();
+
+        task.status = status_mapper::working_status();
+        self.runtime
+            .task_manager()
+            .save_task(auth_ctx, &task)
+            .await?;
+
+        Ok(PreparedContinuation {
+            handler: skill_reg.handler_arc(),
+            identifiers: TaskIdentifiers::new(task.context_id.clone(), task.id.clone()),
+            task,
+            task_state,
+        })
+    }
+
     /// Finds a skill handler by its ID in the agent definition.
     ///
     /// # Arguments
@@ -534,68 +769,26 @@ impl RequestExecutor {
         skill_id: &str,
         initial_message: Content,
     ) -> AgentResult<a2a_types::Task> {
-        // 1. Generate task ID and find skill
-        let task_id = Uuid::new_v4().to_string();
-        let skill_reg = self.find_skill_by_id(skill_id)?;
-
-        // 2. Create initial task with Working status
-        let task = Task {
-            id: task_id.clone(),
-            context_id: context_id.to_string(),
-            status: status_mapper::working_status(),
-            artifacts: vec![],
-        };
-
-        // 3. Save initial task
-        self.runtime
-            .task_manager()
-            .save_task(auth_ctx, &task)
+        let InitializedTask {
+            task,
+            handler,
+            task_state,
+            identifiers,
+        } = self
+            .initialize_new_task(auth_ctx, context_id, skill_id, initial_message.clone())
             .await?;
 
-        // 4. Associate skill with task
-        self.runtime
-            .task_manager()
-            .set_task_skill(auth_ctx, &task_id, skill_id)
-            .await?;
-
-        // 5. Record the user's message against the concrete task so history remains consistent.
-        let user_message_event = {
-            let message = utils::create_a2a_message(
-                Some(context_id),
-                Some(&task_id),
-                Role::User,
-                initial_message.clone(),
-            );
-            TaskEvent::Message(message)
-        };
-        self.runtime
-            .task_manager()
-            .add_task_event(auth_ctx, &user_message_event)
-            .await?;
-        self.runtime.event_bus().publish(&user_message_event);
-
-        // 6. Create execution contexts
-        let task_context = TaskContext::for_task(
-            auth_ctx.clone(),
-            self.runtime.task_manager(),
-            self.runtime.event_bus(),
-            context_id.to_string(),
-            task_id.clone(),
-        );
-        let handler = skill_reg.handler_arc();
-        let identifiers = TaskIdentifiers::new(context_id.to_string(), task_id.clone());
-        let task = drive_on_request(
+        let task = drive_task(
             Arc::clone(&self.runtime),
             handler,
-            task_context,
+            task_state,
             auth_ctx.clone(),
             identifiers,
-            initial_message,
+            ExecutionPhase::Initial(initial_message),
             task,
         )
         .await?;
 
-        // 15. Reconstruct full A2A task with history
         self.reconstruct_a2a_task(auth_ctx, &task).await
     }
 
@@ -606,66 +799,27 @@ impl RequestExecutor {
     async fn continue_task_blocking(
         &self,
         auth_ctx: &AuthContext,
-        mut task: Task,
+        task: Task,
         user_message: Content,
     ) -> AgentResult<a2a_types::Task> {
-        // 1. Validate current state
-        if !status_mapper::can_continue(&task.status.state) {
-            return Err(AgentError::InvalidTaskStateTransition {
-                from: format!("{:?}", task.status.state),
-                to: "continuation".to_string(),
-            });
-        }
+        let PreparedContinuation {
+            task,
+            task_state,
+            handler,
+            identifiers,
+        } = self.prepare_task_for_continuation(auth_ctx, task).await?;
 
-        // 2. Get associated skill
-        let skill_id = self
-            .runtime
-            .task_manager()
-            .get_task_skill(auth_ctx, &task.id)
-            .await?
-            .ok_or_else(|| AgentError::Internal {
-                component: "task_manager".to_string(),
-                reason: format!("No skill associated with task {}", task.id),
-            })?;
-
-        let skill_reg = self.find_skill_by_id(&skill_id)?;
-
-        // 3. Load task context
-        let mut task_context = self
-            .runtime
-            .task_manager()
-            .load_task_context(auth_ctx, &task.id)
-            .await?
-            .unwrap_or_else(TaskContext::new);
-        task_context.attach_handles(
-            auth_ctx.clone(),
-            self.runtime.task_manager(),
-            self.runtime.event_bus(),
-            task.context_id.clone(),
-            task.id.clone(),
-        );
-
-        // 4. Update to Working state
-        task.status = status_mapper::working_status();
-        self.runtime
-            .task_manager()
-            .save_task(auth_ctx, &task)
-            .await?;
-
-        let handler = skill_reg.handler_arc();
-        let identifiers = TaskIdentifiers::new(task.context_id.clone(), task.id.clone());
-        let task = drive_on_input(
+        let task = drive_task(
             Arc::clone(&self.runtime),
             handler,
-            task_context,
+            task_state,
             auth_ctx.clone(),
             identifiers,
-            user_message,
+            ExecutionPhase::Input(user_message),
             task,
         )
         .await?;
 
-        // Reconstruct full A2A task
         self.reconstruct_a2a_task(auth_ctx, &task).await
     }
 
@@ -748,72 +902,38 @@ impl RequestExecutor {
         skill_id: &str,
         initial_message: Content,
     ) -> AgentResult<TaskStream> {
-        let task_id = Uuid::new_v4().to_string();
-        let skill_reg = self.find_skill_by_id(skill_id)?;
-
-        let task = Task {
-            id: task_id.clone(),
-            context_id: context_id.to_string(),
-            status: status_mapper::working_status(),
-            artifacts: vec![],
-        };
-
-        self.runtime
-            .task_manager()
-            .save_task(auth_ctx, &task)
+        let InitializedTask {
+            task,
+            handler,
+            task_state,
+            identifiers,
+        } = self
+            .initialize_new_task(auth_ctx, context_id, skill_id, initial_message.clone())
             .await?;
 
-        self.runtime
-            .task_manager()
-            .set_task_skill(auth_ctx, &task_id, skill_id)
+        let initial_events = self
+            .collect_new_events(auth_ctx, &identifiers.task_id, 0)
             .await?;
 
-        let user_message = utils::create_a2a_message(
-            Some(context_id),
-            Some(&task_id),
-            Role::User,
-            initial_message.clone(),
-        );
-        let message_event = TaskEvent::Message(user_message);
-        self.runtime
-            .task_manager()
-            .add_task_event(auth_ctx, &message_event)
-            .await?;
-        self.runtime.event_bus().publish(&message_event);
-
-        let initial_events = self.collect_new_events(auth_ctx, &task_id, 0).await?;
-
-        let task_context = TaskContext::for_task(
-            auth_ctx.clone(),
-            self.runtime.task_manager(),
-            self.runtime.event_bus(),
-            context_id.to_string(),
-            task_id.clone(),
-        );
-
-        let handler = skill_reg.handler_arc();
-        let identifiers = TaskIdentifiers::new(context_id.to_string(), task_id.clone());
         let runtime = Arc::clone(&self.runtime);
         let auth_clone = auth_ctx.clone();
-        let message_clone = initial_message.clone();
-        let receiver = Some(self.runtime.event_bus().subscribe(&task_id));
+        let receiver = Some(self.runtime.event_bus().subscribe(&identifiers.task_id));
 
         compat::spawn({
-            let log_task_id = identifiers.task_id.clone();
             async move {
-                if let Err(err) = drive_on_request(
+                if let Err(err) = drive_task(
                     runtime,
                     handler,
-                    task_context,
+                    task_state,
                     auth_clone,
-                    identifiers,
-                    message_clone,
+                    identifiers.clone(),
+                    ExecutionPhase::Initial(initial_message),
                     task,
                 )
                 .await
                 {
                     error!(
-                        task_id = %log_task_id,
+                        task_id = %identifiers.task_id,
                         error = %err,
                         "failed to execute streaming task"
                     );
@@ -833,76 +953,41 @@ impl RequestExecutor {
     async fn continue_task_streaming(
         &self,
         auth_ctx: &AuthContext,
-        mut task: Task,
+        task: Task,
         user_message: Content,
         baseline_len: usize,
     ) -> AgentResult<TaskStream> {
-        if !status_mapper::can_continue(&task.status.state) {
-            return Err(AgentError::InvalidTaskStateTransition {
-                from: format!("{:?}", task.status.state),
-                to: "continuation".to_string(),
-            });
-        }
-
-        let skill_id = self
-            .runtime
-            .task_manager()
-            .get_task_skill(auth_ctx, &task.id)
-            .await?
-            .ok_or_else(|| AgentError::Internal {
-                component: "task_manager".to_string(),
-                reason: format!("No skill associated with task {}", task.id),
-            })?;
-        let skill_reg = self.find_skill_by_id(&skill_id)?;
-
         let initial_events = self
             .collect_new_events(auth_ctx, &task.id, baseline_len)
             .await?;
 
-        task.status = status_mapper::working_status();
-        self.runtime
-            .task_manager()
-            .save_task(auth_ctx, &task)
-            .await?;
+        let PreparedContinuation {
+            task,
+            task_state,
+            handler,
+            identifiers,
+        } = self.prepare_task_for_continuation(auth_ctx, task).await?;
 
-        let mut task_context = self
-            .runtime
-            .task_manager()
-            .load_task_context(auth_ctx, &task.id)
-            .await?
-            .unwrap_or_else(TaskContext::new);
-        task_context.attach_handles(
-            auth_ctx.clone(),
-            self.runtime.task_manager(),
-            self.runtime.event_bus(),
-            task.context_id.clone(),
-            task.id.clone(),
-        );
-
-        let handler = skill_reg.handler_arc();
-        let identifiers = TaskIdentifiers::new(task.context_id.clone(), task.id.clone());
         let runtime = Arc::clone(&self.runtime);
         let auth_clone = auth_ctx.clone();
-        let user_content_clone = user_message.clone();
-        let receiver = Some(self.runtime.event_bus().subscribe(&task.id));
-        let task_for_execution = task;
+        let receiver = Some(self.runtime.event_bus().subscribe(&identifiers.task_id));
+        let phase = ExecutionPhase::Input(user_message);
 
         compat::spawn({
-            let task_id_for_exec = identifiers.task_id.clone();
             async move {
-                if let Err(err) = drive_on_input(
+                if let Err(err) = drive_task(
                     runtime,
                     handler,
-                    task_context,
+                    task_state,
                     auth_clone,
-                    identifiers,
-                    user_content_clone,
-                    task_for_execution,
+                    identifiers.clone(),
+                    phase,
+                    task,
                 )
                 .await
                 {
                     error!(
-                        task_id = %task_id_for_exec,
+                        task_id = %identifiers.task_id,
                         error = %err,
                         "failed to execute streaming continuation"
                     );
@@ -942,234 +1027,107 @@ impl RequestExecutor {
         role: Role,
         content: Content,
     ) -> AgentResult<a2a_types::Message> {
-        let message = utils::create_a2a_message(Some(context_id), task_id, role, content);
-        let event = TaskEvent::Message(message.clone());
-        self.runtime
-            .task_manager()
-            .add_task_event(auth_ctx, &event)
-            .await?;
-        self.runtime.event_bus().publish(&event);
-        Ok(message)
+        let writer = TaskEventWriter::new(&self.runtime);
+        writer
+            .message(auth_ctx, context_id, task_id, role, content)
+            .await
     }
 }
 
-async fn drive_on_request(
+async fn drive_task(
     runtime: Arc<dyn ExecutorRuntime>,
     handler: Arc<dyn SkillHandler>,
-    mut task_context: TaskContext,
+    task_state: TaskState,
     auth_ctx: AuthContext,
     identifiers: TaskIdentifiers,
-    initial_message: Content,
+    phase: ExecutionPhase,
     mut task: Task,
 ) -> AgentResult<Task> {
     let TaskIdentifiers {
         context_id,
         task_id,
     } = identifiers;
-    let context = Context::new(auth_ctx.clone());
-    let runtime_for_handlers: &dyn AgentRuntime = runtime.as_ref();
-    let result = handler
-        .on_request(
-            &mut task_context,
-            &context,
-            runtime_for_handlers,
-            initial_message,
-        )
-        .await?;
 
-    let final_status = status_mapper::on_request_to_status(&result);
+    let session_state = runtime
+        .task_manager()
+        .load_session_state(&auth_ctx, &context_id)
+        .await?
+        .unwrap_or_default();
+
+    let mut state = State::with_states(task_state, session_state);
+
+    let progress = ProgressSender::new(
+        auth_ctx.clone(),
+        runtime.task_manager(),
+        runtime.event_bus(),
+        &context_id,
+        &task_id,
+    );
+
+    let runtime_for_handlers: &dyn AgentRuntime = runtime.as_ref();
+    let result = match phase {
+        ExecutionPhase::Initial(content) => ExecutionResult::Initial(
+            handler
+                .on_request(&mut state, &progress, runtime_for_handlers, content)
+                .await?,
+        ),
+        ExecutionPhase::Input(content) => ExecutionResult::Input(
+            handler
+                .on_input_received(&mut state, &progress, runtime_for_handlers, content)
+                .await?,
+        ),
+    };
+
+    let writer = TaskEventWriter::new(&runtime);
+    let final_status = result.status();
     task.status = final_status.clone();
 
-    if let OnRequestResult::Completed { artifacts, .. } = &result {
+    if let Some(artifacts) = result.artifacts() {
         task.artifacts = utils::artifacts_to_a2a(artifacts);
-
-        for artifact in artifacts {
-            let event = a2a_types::TaskArtifactUpdateEvent {
-                kind: a2a_types::ARTIFACT_UPDATE_KIND.to_string(),
-                task_id: task_id.clone(),
-                context_id: context_id.clone(),
-                artifact: utils::artifact_to_a2a(artifact),
-                append: None,
-                last_chunk: Some(true),
-                metadata: None,
-            };
-            let task_event = TaskEvent::ArtifactUpdate(event);
-            runtime
-                .task_manager()
-                .add_task_event(&auth_ctx, &task_event)
-                .await?;
-            runtime.event_bus().publish(&task_event);
-        }
+        writer
+            .artifacts(&auth_ctx, &task_id, &context_id, artifacts)
+            .await?;
     }
 
-    if let OnRequestResult::InputRequired { slot, .. } = &result {
-        task_context.set_pending_slot(slot.clone());
+    if let Some(slot) = result.slot() {
+        state.set_pending_slot(slot.clone());
     } else {
-        task_context.clear_pending_slot();
+        state.clear_pending_slot();
     }
+
+    let (task_state, session_state) = state.into_parts();
 
     runtime
         .task_manager()
-        .save_task_context(&auth_ctx, &task_id, &task_context)
+        .save_task_state(&auth_ctx, &task_id, &task_state)
         .await?;
 
-    emit_on_request_message(
-        Arc::clone(&runtime),
-        &auth_ctx,
-        &task_id,
-        &context_id,
-        &result,
-    )
-    .await?;
+    runtime
+        .task_manager()
+        .save_session_state(&auth_ctx, &context_id, &session_state)
+        .await?;
+
+    if let Some(content) = result.message_content() {
+        writer
+            .message(
+                &auth_ctx,
+                &context_id,
+                Some(&task_id),
+                Role::Assistant,
+                content.clone(),
+            )
+            .await?;
+    }
 
     let is_final = status_mapper::is_terminal_state(&final_status.state)
         || final_status.state == a2a_types::TaskState::InputRequired;
-    let status_event =
-        status_mapper::create_status_update_event(&task_id, &context_id, final_status, is_final);
-    let task_event = TaskEvent::StatusUpdate(status_event);
-    runtime
-        .task_manager()
-        .add_task_event(&auth_ctx, &task_event)
+    writer
+        .status(&auth_ctx, &task_id, &context_id, final_status, is_final)
         .await?;
-    runtime.event_bus().publish(&task_event);
 
     runtime.task_manager().save_task(&auth_ctx, &task).await?;
 
     Ok(task)
-}
-
-async fn drive_on_input(
-    runtime: Arc<dyn ExecutorRuntime>,
-    handler: Arc<dyn SkillHandler>,
-    mut task_context: TaskContext,
-    auth_ctx: AuthContext,
-    identifiers: TaskIdentifiers,
-    user_message: Content,
-    mut task: Task,
-) -> AgentResult<Task> {
-    let TaskIdentifiers {
-        context_id,
-        task_id,
-    } = identifiers;
-    let context = Context::new(auth_ctx.clone());
-    let runtime_for_handlers: &dyn AgentRuntime = runtime.as_ref();
-    let result = handler
-        .on_input_received(
-            &mut task_context,
-            &context,
-            runtime_for_handlers,
-            user_message,
-        )
-        .await?;
-
-    let final_status = status_mapper::on_input_to_status(&result);
-    task.status = final_status.clone();
-
-    if let OnInputResult::Completed { artifacts, .. } = &result {
-        task.artifacts = utils::artifacts_to_a2a(artifacts);
-
-        for artifact in artifacts {
-            let event = a2a_types::TaskArtifactUpdateEvent {
-                kind: a2a_types::ARTIFACT_UPDATE_KIND.to_string(),
-                task_id: task_id.clone(),
-                context_id: context_id.clone(),
-                artifact: utils::artifact_to_a2a(artifact),
-                append: None,
-                last_chunk: Some(true),
-                metadata: None,
-            };
-            let task_event = TaskEvent::ArtifactUpdate(event);
-            runtime
-                .task_manager()
-                .add_task_event(&auth_ctx, &task_event)
-                .await?;
-            runtime.event_bus().publish(&task_event);
-        }
-    }
-
-    runtime
-        .task_manager()
-        .save_task_context(&auth_ctx, &task_id, &task_context)
-        .await?;
-
-    emit_on_input_message(
-        Arc::clone(&runtime),
-        &auth_ctx,
-        &task_id,
-        &context_id,
-        &result,
-    )
-    .await?;
-
-    let is_final = status_mapper::is_terminal_state(&final_status.state)
-        || final_status.state == a2a_types::TaskState::InputRequired;
-    let status_event =
-        status_mapper::create_status_update_event(&task_id, &context_id, final_status, is_final);
-    let task_event = TaskEvent::StatusUpdate(status_event);
-    runtime
-        .task_manager()
-        .add_task_event(&auth_ctx, &task_event)
-        .await?;
-    runtime.event_bus().publish(&task_event);
-
-    runtime.task_manager().save_task(&auth_ctx, &task).await?;
-
-    Ok(task)
-}
-
-async fn emit_on_request_message(
-    runtime: Arc<dyn ExecutorRuntime>,
-    auth_ctx: &AuthContext,
-    task_id: &str,
-    context_id: &str,
-    result: &OnRequestResult,
-) -> AgentResult<()> {
-    let message_content = match result {
-        OnRequestResult::InputRequired { message, .. } => Some(message.clone()),
-        OnRequestResult::Completed { message, .. } => message.clone(),
-        OnRequestResult::Failed { error } => Some(error.clone()),
-        OnRequestResult::Rejected { reason } => Some(reason.clone()),
-    };
-
-    if let Some(content) = message_content {
-        let assistant_message =
-            utils::create_a2a_message(Some(context_id), Some(task_id), Role::Assistant, content);
-        let event = TaskEvent::Message(assistant_message);
-        runtime
-            .task_manager()
-            .add_task_event(auth_ctx, &event)
-            .await?;
-        runtime.event_bus().publish(&event);
-    }
-
-    Ok(())
-}
-
-async fn emit_on_input_message(
-    runtime: Arc<dyn ExecutorRuntime>,
-    auth_ctx: &AuthContext,
-    task_id: &str,
-    context_id: &str,
-    result: &OnInputResult,
-) -> AgentResult<()> {
-    let message_content = match result {
-        OnInputResult::InputRequired { message, .. } => Some(message.clone()),
-        OnInputResult::Completed { message, .. } => message.clone(),
-        OnInputResult::Failed { error } => Some(error.clone()),
-    };
-
-    if let Some(content) = message_content {
-        let assistant_message =
-            utils::create_a2a_message(Some(context_id), Some(task_id), Role::Assistant, content);
-        let event = TaskEvent::Message(assistant_message);
-        runtime
-            .task_manager()
-            .add_task_event(auth_ctx, &event)
-            .await?;
-        runtime.event_bus().publish(&event);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1254,8 +1212,8 @@ mod tests {
     impl SkillHandler for SimpleSkill {
         async fn on_request(
             &self,
-            _task_context: &mut TaskContext,
-            _context: &Context,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {
@@ -1295,12 +1253,12 @@ mod tests {
     impl SkillHandler for MultiTurnSkill {
         async fn on_request(
             &self,
-            task_context: &mut TaskContext,
-            _context: &Context,
+            state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {
-            task_context.save_data("asked", &true)?;
+            state.task().save("asked", &true)?;
             Ok(OnRequestResult::InputRequired {
                 message: Content::from_text("Need more info"),
                 slot: SkillSlot::new("details"),
@@ -1309,12 +1267,12 @@ mod tests {
 
         async fn on_input_received(
             &self,
-            task_context: &mut TaskContext,
-            _context: &Context,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             content: Content,
         ) -> Result<OnInputResult, AgentError> {
-            task_context.clear_pending_slot();
+            // Slot is cleared by executor, no need to call clear_pending_slot
             let response = format!("Received: {}", content.joined_texts().unwrap_or_default());
             Ok(OnInputResult::Completed {
                 message: Some(Content::from_text(response)),
@@ -1415,13 +1373,13 @@ mod tests {
         };
         assert_eq!(updated.status.state, a2a_types::TaskState::Completed);
 
-        let context = runtime
+        let task_state = runtime
             .task_manager()
-            .load_task_context(&auth, &updated.id)
+            .load_task_state(&auth, &updated.id)
             .await
-            .expect("load context")
-            .expect("context present");
-        let slot: Option<String> = context.load_slot().expect("slot load");
+            .expect("load state")
+            .expect("state present");
+        let slot: Option<String> = task_state.slot().expect("slot load");
         assert!(slot.is_none());
     }
 

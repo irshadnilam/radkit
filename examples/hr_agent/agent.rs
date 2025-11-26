@@ -11,7 +11,6 @@ use hr_agent_skills::summarize_resume::SummarizeResumeSkill;
 
 pub fn configure_agent() -> AgentDefinition {
     Agent::builder()
-        .with_id("hr-agent-v1")
         .with_name("HR Agent")
         .with_description(
             "An intelligent HR agent that handles resume processing, onboarding, \
