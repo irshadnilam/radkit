@@ -4,7 +4,7 @@ use radkit::agent::{OnRequestResult, SkillHandler};
 use radkit::errors::AgentError;
 use radkit::macros::skill;
 use radkit::models::Content;
-use radkit::runtime::context::{Context, TaskContext};
+use radkit::runtime::context::{ProgressSender, State};
 use radkit::runtime::AgentRuntime;
 
 // --- Skill Logic Implementation ---
@@ -31,13 +31,13 @@ pub struct CreateItAccountsSkill;
 impl SkillHandler for CreateItAccountsSkill {
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         content: Content,
     ) -> Result<OnRequestResult, AgentError> {
         // Extract role and name from content
-        let text = content
+        let _text = content
             .first_text()
             .ok_or_else(|| AgentError::MissingInput("No text content in message".to_string()))?;
 
@@ -46,8 +46,8 @@ impl SkillHandler for CreateItAccountsSkill {
         let name = "New Hire";
 
         // Send intermediate update
-        task_context
-            .send_intermediate_update(format!("Creating IT accounts for {} as {}...", name, role))
+        progress
+            .send_update(format!("Creating IT accounts for {} as {}...", name, role))
             .await?;
 
         // TODO: In a real implementation, this would call the DevOps agent via A2A

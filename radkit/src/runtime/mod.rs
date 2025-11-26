@@ -74,6 +74,14 @@ use tower_http::services::{ServeDir, ServeFile};
 /// event bus remain internal to the runtime so advanced orchestration can
 /// evolve without affecting the public API.
 pub trait AgentRuntime: MaybeSend + MaybeSync {
+    /// Returns the current user's authentication context.
+    ///
+    /// This provides access to the app name and user name for the current
+    /// request, useful for multi-tenant scenarios.
+    fn current_user(&self) -> context::AuthContext {
+        self.auth().get_auth_context()
+    }
+
     /// Returns the authentication service.
     fn auth(&self) -> Arc<dyn AuthService>;
 
@@ -104,7 +112,9 @@ pub struct Runtime {
     negotiator: Arc<dyn core::negotiator::Negotiator>,
     event_bus: Arc<TaskEventBus>,
     agent: Arc<AgentDefinition>,
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     base_url: Option<String>,
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     bind_address: Option<String>,
 }
 
@@ -128,14 +138,17 @@ impl Runtime {
     }
 
     /// Returns the agent definition owned by this runtime.
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     pub(crate) fn agent(&self) -> &AgentDefinition {
         &self.agent
     }
 
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     pub(crate) fn configured_base_url(&self) -> Option<&str> {
         self.base_url.as_deref()
     }
 
+    #[cfg_attr(all(target_os = "wasi", target_env = "p1"), allow(dead_code))]
     pub(crate) fn bind_address(&self) -> Option<&str> {
         self.bind_address.as_deref()
     }
@@ -372,10 +385,7 @@ mod tests {
     use crate::test_support::FakeLlm;
 
     fn test_agent() -> AgentDefinition {
-        Agent::builder()
-            .with_id("test-agent")
-            .with_name("Test Agent")
-            .build()
+        Agent::builder().with_name("Test Agent").build()
     }
 
     #[test]

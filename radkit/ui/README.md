@@ -67,17 +67,20 @@ radkit/ui/
 ## Available Routes
 
 ### A2A Protocol Routes (Backend)
-- `/{agent_id}/.well-known/agent-card.json` - Agent metadata
-- `/{agent_id}/{version}/rpc` - JSON-RPC endpoint
-- `/{agent_id}/{version}/message:stream` - Server-Sent Events streaming
-- `/{agent_id}/{version}/tasks/{task_id}/subscribe` - Task resubscription
+- `/.well-known/agent-card.json` - Agent metadata
+- `/rpc` - JSON-RPC endpoint
+- `/message:stream` - Server-Sent Events streaming
+- `/tasks/{task_id}/subscribe` - Task resubscription
 
 ### UI API Routes (dev-ui only)
-- `/ui/agents` - List all registered agents (discovery endpoint)
+- `/ui/agent` - Single agent metadata
+- `/ui/contexts` - List contexts for the current agent
+- `/ui/contexts/{context_id}/tasks` - Tasks for a context
+- `/ui/tasks/{task_id}/events` - Task events stream
+- `/ui/tasks/{task_id}/transitions` - Task transitions
 
 ### UI Routes (Frontend, Client-Side Routing)
-- `/` - Agents list (home page)
-- `/agents/:agentId` - Agent detail with interactive console
+- `/` - Agent dashboard with interactive console
 
 ## Technology Stack
 

@@ -1,7 +1,7 @@
 use radkit::agent::{OnRequestResult, RegisteredSkill, SkillHandler};
 use radkit::errors::AgentError;
 use radkit::models::Content;
-use radkit::runtime::context::{Context, TaskContext};
+use radkit::runtime::context::{ProgressSender, State};
 use radkit::runtime::AgentRuntime;
 use radkit_macros::skill;
 
@@ -20,8 +20,8 @@ struct TestSkill;
 impl SkillHandler for TestSkill {
     async fn on_request(
         &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         _content: Content,
     ) -> Result<OnRequestResult, AgentError> {
@@ -55,8 +55,8 @@ struct FullSkill;
 impl SkillHandler for FullSkill {
     async fn on_request(
         &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         _content: Content,
     ) -> Result<OnRequestResult, AgentError> {
@@ -90,8 +90,8 @@ struct EmptyArraysSkill;
 impl SkillHandler for EmptyArraysSkill {
     async fn on_request(
         &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         _content: Content,
     ) -> Result<OnRequestResult, AgentError> {

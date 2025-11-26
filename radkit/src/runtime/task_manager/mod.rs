@@ -112,22 +112,22 @@ pub trait TaskStore: MaybeSend + MaybeSync {
     /// Lists all known context IDs for the current auth context.
     async fn list_context_ids(&self, auth_ctx: &AuthContext) -> AgentResult<Vec<String>>;
 
-    /// Saves the task context state for multi-turn conversations.
-    async fn save_task_context(
+    /// Saves the task state for multi-turn conversations.
+    async fn save_task_state(
         &self,
         auth_ctx: &AuthContext,
         task_id: &str,
-        context: &crate::runtime::context::TaskContext,
+        state: &crate::runtime::context::TaskState,
     ) -> AgentResult<()>;
 
-    /// Loads the task context state for a given task.
+    /// Loads the task state for a given task.
     ///
-    /// Returns `None` if no context has been saved yet.
-    async fn load_task_context(
+    /// Returns `None` if no state has been saved yet.
+    async fn load_task_state(
         &self,
         auth_ctx: &AuthContext,
         task_id: &str,
-    ) -> AgentResult<Option<crate::runtime::context::TaskContext>>;
+    ) -> AgentResult<Option<crate::runtime::context::TaskState>>;
 
     /// Associates a skill ID with a task for continuation purposes.
     async fn set_task_skill(
@@ -145,6 +145,26 @@ pub trait TaskStore: MaybeSend + MaybeSync {
         auth_ctx: &AuthContext,
         task_id: &str,
     ) -> AgentResult<Option<String>>;
+
+    /// Saves session state for cross-skill data sharing.
+    ///
+    /// Session state is scoped to `context_id` and shared across all tasks
+    /// within the same conversation/session.
+    async fn save_session_state(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+        state: &crate::runtime::context::SessionState,
+    ) -> AgentResult<()>;
+
+    /// Loads session state for a given context.
+    ///
+    /// Returns `None` if no session state has been saved yet.
+    async fn load_session_state(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+    ) -> AgentResult<Option<crate::runtime::context::SessionState>>;
 }
 
 // ============================================================================
@@ -210,25 +230,25 @@ pub trait TaskManager: MaybeSend + MaybeSync {
     /// only contain negotiation messages (no tasks yet).
     async fn list_context_ids(&self, auth_ctx: &AuthContext) -> AgentResult<Vec<String>>;
 
-    /// Saves the task context state for multi-turn conversations.
+    /// Saves the task state for multi-turn conversations.
     ///
     /// This allows skills to persist data between `on_request` and `on_input_received` calls.
-    /// The context is namespaced by `AuthContext` to ensure tenant isolation.
-    async fn save_task_context(
+    /// The state is namespaced by `AuthContext` to ensure tenant isolation.
+    async fn save_task_state(
         &self,
         auth_ctx: &AuthContext,
         task_id: &str,
-        context: &crate::runtime::context::TaskContext,
+        state: &crate::runtime::context::TaskState,
     ) -> AgentResult<()>;
 
-    /// Loads the task context state for a given task.
+    /// Loads the task state for a given task.
     ///
-    /// Returns `None` if no context has been saved yet.
-    async fn load_task_context(
+    /// Returns `None` if no state has been saved yet.
+    async fn load_task_state(
         &self,
         auth_ctx: &AuthContext,
         task_id: &str,
-    ) -> AgentResult<Option<crate::runtime::context::TaskContext>>;
+    ) -> AgentResult<Option<crate::runtime::context::TaskState>>;
 
     /// Associates a skill ID with a task for continuation purposes.
     ///
@@ -248,4 +268,25 @@ pub trait TaskManager: MaybeSend + MaybeSync {
         auth_ctx: &AuthContext,
         task_id: &str,
     ) -> AgentResult<Option<String>>;
+
+    /// Saves session state for cross-skill data sharing.
+    ///
+    /// Session state is scoped to `context_id` and shared across all tasks
+    /// within the same conversation/session. This enables skills to pass data
+    /// to each other (e.g., user data extracted by one skill used by another).
+    async fn save_session_state(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+        state: &crate::runtime::context::SessionState,
+    ) -> AgentResult<()>;
+
+    /// Loads session state for a given context.
+    ///
+    /// Returns `None` if no session state has been saved yet for this context.
+    async fn load_session_state(
+        &self,
+        auth_ctx: &AuthContext,
+        context_id: &str,
+    ) -> AgentResult<Option<crate::runtime::context::SessionState>>;
 }

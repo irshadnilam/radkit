@@ -21,7 +21,6 @@
 //!
 //! // Create a simple agent
 //! let agent = Agent::builder()
-//!     .with_id("my-agent")
 //!     .with_name("My Agent")
 //!     .build();
 //!

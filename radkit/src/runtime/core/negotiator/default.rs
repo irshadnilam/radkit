@@ -247,7 +247,7 @@ mod tests {
     use crate::agent::{Agent, OnRequestResult, RegisteredSkill, SkillHandler, SkillMetadata};
     use crate::errors::{AgentError, AgentResult};
     use crate::models::LlmResponse;
-    use crate::runtime::context::{Context as RuntimeContext, TaskContext as RuntimeTaskContext};
+    use crate::runtime::context::{ProgressSender, State};
     use crate::runtime::AgentRuntime;
     use crate::test_support::FakeLlm;
     use std::sync::Arc;
@@ -275,8 +275,8 @@ mod tests {
     impl SkillHandler for StubSkill {
         async fn on_request(
             &self,
-            _task_context: &mut RuntimeTaskContext,
-            _context: &RuntimeContext,
+            _state: &mut State,
+            _progress: &ProgressSender,
             _runtime: &dyn AgentRuntime,
             _content: Content,
         ) -> Result<OnRequestResult, AgentError> {

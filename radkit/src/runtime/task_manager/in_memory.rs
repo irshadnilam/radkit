@@ -48,10 +48,12 @@ mod native {
     pub struct InMemoryTaskStore {
         tasks: Arc<DashMap<String, Task>>,
         events: Arc<DashMap<String, Vec<TaskEvent>>>,
-        /// Store `TaskContext` state for multi-turn conversations
-        task_contexts: Arc<DashMap<String, String>>, // Store as JSON string
+        /// Store `TaskState` for multi-turn conversations (task-scoped)
+        task_states: Arc<DashMap<String, String>>, // Store as JSON string
         /// Store skill ID associations for task continuation
         task_skills: Arc<DashMap<String, String>>,
+        /// Store `SessionState` for cross-skill data sharing (context-scoped)
+        session_states: Arc<DashMap<String, String>>, // Store as JSON string
     }
 
     impl InMemoryTaskStore {
@@ -158,38 +160,38 @@ mod native {
             Ok(contexts.into_iter().collect())
         }
 
-        async fn save_task_context(
+        async fn save_task_state(
             &self,
             auth_ctx: &AuthContext,
             task_id: &str,
-            context: &crate::runtime::context::TaskContext,
+            state: &crate::runtime::context::TaskState,
         ) -> AgentResult<()> {
             let key = Self::get_namespaced_key(auth_ctx, task_id);
-            let json_str = serde_json::to_string(context).map_err(|e| {
+            let json_str = serde_json::to_string(state).map_err(|e| {
                 crate::errors::AgentError::Serialization {
                     format: "json".to_string(),
-                    reason: format!("Failed to serialize TaskContext: {e}"),
+                    reason: format!("Failed to serialize TaskState: {e}"),
                 }
             })?;
-            self.task_contexts.insert(key, json_str);
+            self.task_states.insert(key, json_str);
             Ok(())
         }
 
-        async fn load_task_context(
+        async fn load_task_state(
             &self,
             auth_ctx: &AuthContext,
             task_id: &str,
-        ) -> AgentResult<Option<crate::runtime::context::TaskContext>> {
+        ) -> AgentResult<Option<crate::runtime::context::TaskState>> {
             let key = Self::get_namespaced_key(auth_ctx, task_id);
-            match self.task_contexts.get(&key) {
+            match self.task_states.get(&key) {
                 Some(json_ref) => {
-                    let context = serde_json::from_str(json_ref.value()).map_err(|e| {
+                    let state = serde_json::from_str(json_ref.value()).map_err(|e| {
                         crate::errors::AgentError::Serialization {
                             format: "json".to_string(),
-                            reason: format!("Failed to deserialize TaskContext: {e}"),
+                            reason: format!("Failed to deserialize TaskState: {e}"),
                         }
                     })?;
-                    Ok(Some(context))
+                    Ok(Some(state))
                 }
                 None => Ok(None),
             }
@@ -213,6 +215,43 @@ mod native {
         ) -> AgentResult<Option<String>> {
             let key = Self::get_namespaced_key(auth_ctx, task_id);
             Ok(self.task_skills.get(&key).map(|s| s.value().clone()))
+        }
+
+        async fn save_session_state(
+            &self,
+            auth_ctx: &AuthContext,
+            context_id: &str,
+            state: &crate::runtime::context::SessionState,
+        ) -> AgentResult<()> {
+            let key = Self::get_namespaced_key(auth_ctx, context_id);
+            let json_str = serde_json::to_string(state).map_err(|e| {
+                crate::errors::AgentError::Serialization {
+                    format: "json".to_string(),
+                    reason: format!("Failed to serialize SessionState: {e}"),
+                }
+            })?;
+            self.session_states.insert(key, json_str);
+            Ok(())
+        }
+
+        async fn load_session_state(
+            &self,
+            auth_ctx: &AuthContext,
+            context_id: &str,
+        ) -> AgentResult<Option<crate::runtime::context::SessionState>> {
+            let key = Self::get_namespaced_key(auth_ctx, context_id);
+            match self.session_states.get(&key) {
+                Some(json_ref) => {
+                    let state = serde_json::from_str(json_ref.value()).map_err(|e| {
+                        crate::errors::AgentError::Serialization {
+                            format: "json".to_string(),
+                            reason: format!("Failed to deserialize SessionState: {e}"),
+                        }
+                    })?;
+                    Ok(Some(state))
+                }
+                None => Ok(None),
+            }
         }
     }
 }
@@ -238,10 +277,12 @@ mod wasm {
     pub struct InMemoryTaskStore {
         tasks: RefCell<HashMap<String, Task>>,
         events: RefCell<HashMap<String, Vec<TaskEvent>>>,
-        /// Store `TaskContext` state for multi-turn conversations
-        task_contexts: RefCell<HashMap<String, String>>, // Store as JSON string
+        /// Store `TaskState` for multi-turn conversations (task-scoped)
+        task_states: RefCell<HashMap<String, String>>, // Store as JSON string
         /// Store skill ID associations for task continuation
         task_skills: RefCell<HashMap<String, String>>,
+        /// Store `SessionState` for cross-skill data sharing (context-scoped)
+        session_states: RefCell<HashMap<String, String>>, // Store as JSON string
     }
 
     impl InMemoryTaskStore {
@@ -350,38 +391,38 @@ mod wasm {
             Ok(contexts.into_iter().collect())
         }
 
-        async fn save_task_context(
+        async fn save_task_state(
             &self,
             auth_ctx: &AuthContext,
             task_id: &str,
-            context: &crate::runtime::context::TaskContext,
+            state: &crate::runtime::context::TaskState,
         ) -> AgentResult<()> {
             let key = Self::get_namespaced_key(auth_ctx, task_id);
-            let json_str = serde_json::to_string(context).map_err(|e| {
+            let json_str = serde_json::to_string(state).map_err(|e| {
                 crate::errors::AgentError::Serialization {
                     format: "json".to_string(),
-                    reason: format!("Failed to serialize TaskContext: {e}"),
+                    reason: format!("Failed to serialize TaskState: {e}"),
                 }
             })?;
-            self.task_contexts.borrow_mut().insert(key, json_str);
+            self.task_states.borrow_mut().insert(key, json_str);
             Ok(())
         }
 
-        async fn load_task_context(
+        async fn load_task_state(
             &self,
             auth_ctx: &AuthContext,
             task_id: &str,
-        ) -> AgentResult<Option<crate::runtime::context::TaskContext>> {
+        ) -> AgentResult<Option<crate::runtime::context::TaskState>> {
             let key = Self::get_namespaced_key(auth_ctx, task_id);
-            match self.task_contexts.borrow().get(&key) {
+            match self.task_states.borrow().get(&key) {
                 Some(json_str) => {
-                    let context = serde_json::from_str(json_str).map_err(|e| {
+                    let state = serde_json::from_str(json_str).map_err(|e| {
                         crate::errors::AgentError::Serialization {
                             format: "json".to_string(),
-                            reason: format!("Failed to deserialize TaskContext: {e}"),
+                            reason: format!("Failed to deserialize TaskState: {e}"),
                         }
                     })?;
-                    Ok(Some(context))
+                    Ok(Some(state))
                 }
                 None => Ok(None),
             }
@@ -408,6 +449,43 @@ mod wasm {
             let key = Self::get_namespaced_key(auth_ctx, task_id);
             Ok(self.task_skills.borrow().get(&key).cloned())
         }
+
+        async fn save_session_state(
+            &self,
+            auth_ctx: &AuthContext,
+            context_id: &str,
+            state: &crate::runtime::context::SessionState,
+        ) -> AgentResult<()> {
+            let key = Self::get_namespaced_key(auth_ctx, context_id);
+            let json_str = serde_json::to_string(state).map_err(|e| {
+                crate::errors::AgentError::Serialization {
+                    format: "json".to_string(),
+                    reason: format!("Failed to serialize SessionState: {e}"),
+                }
+            })?;
+            self.session_states.borrow_mut().insert(key, json_str);
+            Ok(())
+        }
+
+        async fn load_session_state(
+            &self,
+            auth_ctx: &AuthContext,
+            context_id: &str,
+        ) -> AgentResult<Option<crate::runtime::context::SessionState>> {
+            let key = Self::get_namespaced_key(auth_ctx, context_id);
+            match self.session_states.borrow().get(&key) {
+                Some(json_str) => {
+                    let state = serde_json::from_str(json_str).map_err(|e| {
+                        crate::errors::AgentError::Serialization {
+                            format: "json".to_string(),
+                            reason: format!("Failed to deserialize SessionState: {e}"),
+                        }
+                    })?;
+                    Ok(Some(state))
+                }
+                None => Ok(None),
+            }
+        }
     }
 }
 
@@ -417,8 +495,10 @@ pub use wasm::InMemoryTaskStore;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::context::{AuthContext, TaskContext};
-    use crate::runtime::task_manager::{DefaultTaskManager, ListTasksFilter, TaskEvent, TaskManager};
+    use crate::runtime::context::{AuthContext, TaskState as RadkitTaskState};
+    use crate::runtime::task_manager::{
+        DefaultTaskManager, ListTasksFilter, TaskEvent, TaskManager,
+    };
     use a2a_types::{
         Message, MessageRole, TaskArtifactUpdateEvent, TaskState, TaskStatus, TaskStatusUpdateEvent,
     };
@@ -541,18 +621,18 @@ mod tests {
             .expect("ids");
         assert_eq!(ids, vec!["task-1".to_string()]);
 
-        let mut context = TaskContext::new();
-        context.save_data("flag", &true).expect("save flag");
+        let mut task_state = RadkitTaskState::new();
+        task_state.save("flag", &true).expect("save flag");
         manager
-            .save_task_context(&auth_ctx, "task-1", &context)
+            .save_task_state(&auth_ctx, "task-1", &task_state)
             .await
-            .expect("save ctx");
+            .expect("save state");
         let restored = manager
-            .load_task_context(&auth_ctx, "task-1")
+            .load_task_state(&auth_ctx, "task-1")
             .await
-            .expect("load ctx")
-            .expect("context present");
-        let flag: Option<bool> = restored.load_data("flag").expect("flag");
+            .expect("load state")
+            .expect("state present");
+        let flag: Option<bool> = restored.load("flag").expect("flag");
         assert_eq!(flag, Some(true));
 
         manager

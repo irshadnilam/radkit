@@ -38,9 +38,6 @@ pub enum AgentError {
     NotImplemented { feature: String },
 
     // === Task Management Errors ===
-    #[error("Agent not found: {agent_id}")]
-    AgentNotFound { agent_id: String },
-
     #[error("Skill not found: {skill_id}")]
     SkillNotFound { skill_id: String },
 
@@ -171,8 +168,7 @@ pub type AgentResult<T> = std::result::Result<T, AgentError>;
 impl IntoResponse for AgentError {
     fn into_response(self) -> Response {
         let (status, error_message) = match &self {
-            Self::AgentNotFound { .. }
-            | Self::SkillNotFound { .. }
+            Self::SkillNotFound { .. }
             | Self::TaskNotFound { .. }
             | Self::SessionNotFound { .. } => (StatusCode::NOT_FOUND, self.to_string()),
 

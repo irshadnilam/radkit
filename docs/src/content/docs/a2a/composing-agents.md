@@ -38,7 +38,6 @@ use radkit::runtime::Runtime;
 // This function defines your agent.
 pub fn configure_agent() -> AgentDefinition {
     Agent::builder()
-        .with_id("my-hr-agent-v1")
         .with_name("HR Assistant Agent")
         .with_description("An intelligent agent for handling HR tasks like resume processing and report generation.")
         // Add the skills to the agent

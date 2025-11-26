@@ -4,7 +4,7 @@ use radkit::agent::{
 };
 use radkit::errors::AgentError;
 use radkit::models::Content;
-use radkit::runtime::context::{Context, TaskContext};
+use radkit::runtime::context::{ProgressSender, State};
 use radkit::runtime::{AgentRuntime, Runtime};
 use radkit::test_support::FakeLlm;
 
@@ -34,12 +34,12 @@ enum LifecycleSlot {
 impl SkillHandler for LifecycleSkill {
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        _context: &Context,
+        state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         _content: Content,
     ) -> Result<OnRequestResult, AgentError> {
-        task_context.save_data("request_seen", &true)?;
+        state.task().save("request_seen", &true)?;
         Ok(OnRequestResult::InputRequired {
             message: Content::from_text("Please provide input."),
             slot: SkillSlot::new(LifecycleSlot::AwaitingInput),
@@ -48,15 +48,15 @@ impl SkillHandler for LifecycleSkill {
 
     async fn on_input_received(
         &self,
-        task_context: &mut TaskContext,
-        _context: &Context,
+        state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         content: Content,
     ) -> Result<OnInputResult, AgentError> {
-        let request_seen: bool = task_context.load_data("request_seen")?.unwrap_or(false);
+        let request_seen: bool = state.task().load("request_seen")?.unwrap_or(false);
         assert!(request_seen, "on_request should have been called first");
 
-        let slot: LifecycleSlot = task_context.load_slot()?.expect("slot should be set");
+        let slot: LifecycleSlot = state.slot()?.expect("slot should be set");
         assert_eq!(slot, LifecycleSlot::AwaitingInput);
 
         let input_text = content.first_text().unwrap_or("");
@@ -80,10 +80,7 @@ impl RegisteredSkill for LifecycleSkill {
 }
 
 fn lifecycle_agent_definition() -> AgentDefinition {
-    Agent::builder()
-        .with_id("test-agent")
-        .with_skill(LifecycleSkill)
-        .build()
+    Agent::builder().with_skill(LifecycleSkill).build()
 }
 
 #[tokio::test]
@@ -93,19 +90,13 @@ async fn test_skill_lifecycle() {
     let runtime = Runtime::builder(lifecycle_agent_definition(), llm).build();
 
     let skill = agent.skills().first().unwrap();
-    let mut task_context = TaskContext::new();
-    let auth_context = runtime.auth().get_auth_context();
-    let context = Context::new(auth_context);
+    let mut state = State::new();
+    let progress = ProgressSender::noop();
 
     // 1. Test on_request
     let request_result = skill
         .handler()
-        .on_request(
-            &mut task_context,
-            &context,
-            &runtime,
-            Content::from_text("start"),
-        )
+        .on_request(&mut state, &progress, &runtime, Content::from_text("start"))
         .await
         .unwrap();
 
@@ -115,7 +106,7 @@ async fn test_skill_lifecycle() {
             let slot_value: LifecycleSlot = slot.deserialize().unwrap();
             assert_eq!(slot_value, LifecycleSlot::AwaitingInput);
             // Simulate what the executor does: store the slot for continuation
-            task_context.set_pending_slot(slot);
+            state.set_slot(slot).unwrap();
         }
         _ => panic!("Expected InputRequired"),
     }
@@ -124,8 +115,8 @@ async fn test_skill_lifecycle() {
     let input_result = skill
         .handler()
         .on_input_received(
-            &mut task_context,
-            &context,
+            &mut state,
+            &progress,
             &runtime,
             Content::from_text("complete"),
         )
@@ -148,33 +139,27 @@ async fn test_skill_lifecycle_with_failure() {
     let runtime = Runtime::builder(lifecycle_agent_definition(), llm).build();
 
     let skill = agent.skills().first().unwrap();
-    let mut task_context = TaskContext::new();
-    let auth_context = runtime.auth().get_auth_context();
-    let context = Context::new(auth_context);
+    let mut state = State::new();
+    let progress = ProgressSender::noop();
 
     // 1. Call on_request
     let request_result = skill
         .handler()
-        .on_request(
-            &mut task_context,
-            &context,
-            &runtime,
-            Content::from_text("start"),
-        )
+        .on_request(&mut state, &progress, &runtime, Content::from_text("start"))
         .await
         .unwrap();
 
     // 2. Extract and set the slot
     if let OnRequestResult::InputRequired { slot, .. } = request_result {
-        task_context.set_pending_slot(slot);
+        state.set_slot(slot).unwrap();
     }
 
     // 3. Test on_input_received with invalid input
     let input_result = skill
         .handler()
         .on_input_received(
-            &mut task_context,
-            &context,
+            &mut state,
+            &progress,
             &runtime,
             Content::from_text("invalid"),
         )
@@ -210,8 +195,8 @@ static IMMEDIATE_METADATA: SkillMetadata = SkillMetadata::new(
 impl SkillHandler for ImmediateSkill {
     async fn on_request(
         &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         content: Content,
     ) -> Result<OnRequestResult, AgentError> {
@@ -220,16 +205,6 @@ impl SkillHandler for ImmediateSkill {
             message: Some(Content::from_text(format!("Processed: {text}"))),
             artifacts: vec![Artifact::from_text("result", "success")],
         })
-    }
-
-    async fn on_input_received(
-        &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
-        _runtime: &dyn AgentRuntime,
-        _content: Content,
-    ) -> Result<OnInputResult, AgentError> {
-        panic!("on_input_received should not be called for immediate completion");
     }
 }
 
@@ -240,10 +215,7 @@ impl RegisteredSkill for ImmediateSkill {
 }
 
 fn immediate_agent_definition() -> AgentDefinition {
-    Agent::builder()
-        .with_id("test-agent")
-        .with_skill(ImmediateSkill)
-        .build()
+    Agent::builder().with_skill(ImmediateSkill).build()
 }
 
 #[tokio::test]
@@ -253,18 +225,12 @@ async fn test_immediate_completion_skill() {
     let runtime = Runtime::builder(immediate_agent_definition(), llm).build();
 
     let skill = agent.skills().first().unwrap();
-    let mut task_context = TaskContext::new();
-    let auth_context = runtime.auth().get_auth_context();
-    let context = Context::new(auth_context);
+    let mut state = State::new();
+    let progress = ProgressSender::noop();
 
     let request_result = skill
         .handler()
-        .on_request(
-            &mut task_context,
-            &context,
-            &runtime,
-            Content::from_text("test"),
-        )
+        .on_request(&mut state, &progress, &runtime, Content::from_text("test"))
         .await
         .unwrap();
 
@@ -299,8 +265,8 @@ static REJECTING_METADATA: SkillMetadata = SkillMetadata::new(
 impl SkillHandler for RejectingSkill {
     async fn on_request(
         &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         content: Content,
     ) -> Result<OnRequestResult, AgentError> {
@@ -316,16 +282,6 @@ impl SkillHandler for RejectingSkill {
             })
         }
     }
-
-    async fn on_input_received(
-        &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
-        _runtime: &dyn AgentRuntime,
-        _content: Content,
-    ) -> Result<OnInputResult, AgentError> {
-        panic!("on_input_received should not be called for rejected requests");
-    }
 }
 
 impl RegisteredSkill for RejectingSkill {
@@ -335,10 +291,7 @@ impl RegisteredSkill for RejectingSkill {
 }
 
 fn rejecting_agent_definition() -> AgentDefinition {
-    Agent::builder()
-        .with_id("test-agent")
-        .with_skill(RejectingSkill)
-        .build()
+    Agent::builder().with_skill(RejectingSkill).build()
 }
 
 #[tokio::test]
@@ -348,16 +301,15 @@ async fn test_rejecting_skill() {
     let runtime = Runtime::builder(rejecting_agent_definition(), llm).build();
 
     let skill = agent.skills().first().unwrap();
-    let mut task_context = TaskContext::new();
-    let auth_context = runtime.auth().get_auth_context();
-    let context = Context::new(auth_context);
+    let mut state = State::new();
+    let progress = ProgressSender::noop();
 
     // Test rejection
     let request_result = skill
         .handler()
         .on_request(
-            &mut task_context,
-            &context,
+            &mut state,
+            &progress,
             &runtime,
             Content::from_text("forbidden action"),
         )
@@ -372,12 +324,12 @@ async fn test_rejecting_skill() {
     }
 
     // Test acceptance
-    let mut task_context = TaskContext::new();
+    let mut state = State::new();
     let request_result = skill
         .handler()
         .on_request(
-            &mut task_context,
-            &context,
+            &mut state,
+            &progress,
             &runtime,
             Content::from_text("allowed action"),
         )
@@ -419,8 +371,8 @@ enum MultiRoundSlot {
 impl SkillHandler for MultiRoundSkill {
     async fn on_request(
         &self,
-        _task_context: &mut TaskContext,
-        _context: &Context,
+        _state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         _content: Content,
     ) -> Result<OnRequestResult, AgentError> {
@@ -432,12 +384,12 @@ impl SkillHandler for MultiRoundSkill {
 
     async fn on_input_received(
         &self,
-        task_context: &mut TaskContext,
-        _context: &Context,
+        state: &mut State,
+        _progress: &ProgressSender,
         _runtime: &dyn AgentRuntime,
         content: Content,
     ) -> Result<OnInputResult, AgentError> {
-        let slot: MultiRoundSlot = task_context.load_slot()?.expect("slot should be set");
+        let slot: MultiRoundSlot = state.slot()?.expect("slot should be set");
 
         match slot {
             MultiRoundSlot::AwaitingName => {
@@ -465,10 +417,7 @@ impl RegisteredSkill for MultiRoundSkill {
 }
 
 fn multi_round_agent_definition() -> AgentDefinition {
-    Agent::builder()
-        .with_id("test-agent")
-        .with_skill(MultiRoundSkill)
-        .build()
+    Agent::builder().with_skill(MultiRoundSkill).build()
 }
 
 #[tokio::test]
@@ -478,26 +427,20 @@ async fn test_multi_round_input_skill() {
     let runtime = Runtime::builder(multi_round_agent_definition(), llm).build();
 
     let skill = agent.skills().first().unwrap();
-    let mut task_context = TaskContext::new();
-    let auth_context = runtime.auth().get_auth_context();
-    let context = Context::new(auth_context);
+    let mut state = State::new();
+    let progress = ProgressSender::noop();
 
     // Round 1: Initial request
     let request_result = skill
         .handler()
-        .on_request(
-            &mut task_context,
-            &context,
-            &runtime,
-            Content::from_text("start"),
-        )
+        .on_request(&mut state, &progress, &runtime, Content::from_text("start"))
         .await
         .unwrap();
 
     match request_result {
         OnRequestResult::InputRequired { message, slot } => {
             assert_eq!(message.first_text(), Some("What is your name?"));
-            task_context.set_pending_slot(slot);
+            state.set_slot(slot).unwrap();
         }
         _ => panic!("Expected InputRequired"),
     }
@@ -505,19 +448,14 @@ async fn test_multi_round_input_skill() {
     // Round 2: Provide name
     let input_result = skill
         .handler()
-        .on_input_received(
-            &mut task_context,
-            &context,
-            &runtime,
-            Content::from_text("Alice"),
-        )
+        .on_input_received(&mut state, &progress, &runtime, Content::from_text("Alice"))
         .await
         .unwrap();
 
     match input_result {
         OnInputResult::InputRequired { message, slot } => {
             assert_eq!(message.first_text(), Some("What is your age?"));
-            task_context.set_pending_slot(slot);
+            state.set_slot(slot).unwrap();
         }
         _ => panic!("Expected InputRequired"),
     }
@@ -525,12 +463,7 @@ async fn test_multi_round_input_skill() {
     // Round 3: Provide age
     let input_result = skill
         .handler()
-        .on_input_received(
-            &mut task_context,
-            &context,
-            &runtime,
-            Content::from_text("30"),
-        )
+        .on_input_received(&mut state, &progress, &runtime, Content::from_text("30"))
         .await
         .unwrap();
 

@@ -672,7 +672,7 @@ use radkit::agent::{Artifact, LlmFunction, OnRequestResult, SkillHandler};
 use radkit::errors::AgentError;
 use radkit::macros::skill;
 use radkit::models::{BaseLlm, Content};
-use radkit::runtime::context::{Context, TaskContext};
+use radkit::runtime::context::{ProgressSender, State};
 use radkit::runtime::Runtime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -709,8 +709,8 @@ pub struct ProfileExtractorSkill;
 impl SkillHandler for ProfileExtractorSkill {
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        context: &Context,
+        state: &mut State,
+        progress: &ProgressSender,
         runtime: &dyn Runtime,
         content: Content,
     ) -> Result<OnRequestResult, AgentError> {
@@ -718,7 +718,7 @@ impl SkillHandler for ProfileExtractorSkill {
         let llm = runtime.llm_provider().default_llm()?;
 
         // Send intermediate update (A2A TaskState::Working)
-        task_context.send_intermediate_update("Analyzing text...").await?;
+        progress.send_update("Analyzing text...").await?;
 
         // Use LLM function for extraction
         let profile = extract_profile_data(llm)
@@ -767,8 +767,8 @@ enum ProfileSlot {
 impl SkillHandler for ProfileExtractorSkill {
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        context: &Context,
+        state: &mut State,
+        progress: &ProgressSender,
         runtime: &dyn Runtime,
         content: Content,
     ) -> Result<OnRequestResult, AgentError> {
@@ -779,22 +779,22 @@ impl SkillHandler for ProfileExtractorSkill {
 
         // Check what information is missing
         if profile.email.is_empty() {
-            task_context.save_data("partial_profile", &profile)?;
+            state.task().save("partial_profile", &profile)?;
 
             // Request email - track with slot
+            state.set_slot(ProfileSlot::Email)?;
             return Ok(OnRequestResult::InputRequired {
                 message: Content::from_text("Please provide the user's email address"),
-                slot: SkillSlot::new(ProfileSlot::Email),
             });
         }
 
         if profile.phone.is_empty() {
-            task_context.save_data("partial_profile", &profile)?;
+            state.task().save("partial_profile", &profile)?;
 
             // Request phone - different slot
+            state.set_slot(ProfileSlot::PhoneNumber)?;
             return Ok(OnRequestResult::InputRequired {
                 message: Content::from_text("Please provide the user's phone number"),
-                slot: SkillSlot::new(ProfileSlot::PhoneNumber),
             });
         }
 
@@ -808,17 +808,17 @@ impl SkillHandler for ProfileExtractorSkill {
     // Handle the follow-up input based on which slot was requested
     async fn on_input_received(
         &self,
-        task_context: &mut TaskContext,
-        context: &Context,
+        state: &mut State,
+        progress: &ProgressSender,
         runtime: &dyn Runtime,
         content: Content,
     ) -> Result<OnInputResult, AgentError> {
         // Get the slot to know which input we're continuing from
-        let slot: ProfileSlot = task_context.load_slot()?.unwrap();
+        let slot: ProfileSlot = state.slot()?.unwrap();
 
         // Load saved state
-        let mut profile: UserProfile = task_context
-            .load_data("partial_profile")?
+        let mut profile: UserProfile = state.task()
+            .load("partial_profile")?
             .ok_or_else(|| anyhow!("No partial profile found"))?;
 
         // Handle different continuation paths based on slot
@@ -828,10 +828,10 @@ impl SkillHandler for ProfileExtractorSkill {
 
                 // Check if we need phone number next
                 if profile.phone.is_empty() {
-                    task_context.save_data("partial_profile", &profile)?;
+                    state.task().save("partial_profile", &profile)?;
+                    state.set_slot(ProfileSlot::PhoneNumber)?;
                     return Ok(OnInputResult::InputRequired {
                         message: Content::from_text("Please provide your phone number"),
-                        slot: SkillSlot::new(ProfileSlot::PhoneNumber),
                     });
                 }
             }
@@ -851,6 +851,7 @@ impl SkillHandler for ProfileExtractorSkill {
         }
 
         // Profile is complete
+        state.clear_slot();
         let artifact = Artifact::from_json("user_profile.json", &profile)?;
         Ok(OnInputResult::Completed {
             message: Some(Content::from_text("Profile completed!")),
@@ -873,15 +874,15 @@ For long-running operations, send progress updates and partial results:
 impl SkillHandler for ReportGeneratorSkill {
     async fn on_request(
         &self,
-        task_context: &mut TaskContext,
-        context: &Context,
+        state: &mut State,
+        progress: &ProgressSender,
         runtime: &dyn Runtime,
         content: Content,
     ) -> Result<OnRequestResult, AgentError> {
         let llm = runtime.llm_provider().default_llm()?;
 
         // Send intermediate status (A2A TaskStatusUpdateEvent with state=working)
-        task_context.send_intermediate_update("Analyzing data...").await?;
+        progress.send_update("Analyzing data...").await?;
 
         let analysis = analyze_data(llm.clone())
             .run(content.first_text().unwrap())
@@ -889,10 +890,10 @@ impl SkillHandler for ReportGeneratorSkill {
 
         // Send partial artifact (A2A TaskArtifactUpdateEvent)
         let partial = Artifact::from_json("analysis.json", &analysis)?;
-        task_context.send_partial_artifact(partial).await?;
+        progress.send_artifact(partial).await?;
 
         // Another update
-        task_context.send_intermediate_update("Generating visualizations...").await?;
+        progress.send_update("Generating visualizations...").await?;
 
         let charts = generate_charts(llm.clone())
             .run(&analysis)
@@ -900,10 +901,10 @@ impl SkillHandler for ReportGeneratorSkill {
 
         // Another partial artifact
         let charts_artifact = Artifact::from_json("charts.json", &charts)?;
-        task_context.send_partial_artifact(charts_artifact).await?;
+        progress.send_artifact(charts_artifact).await?;
 
         // Final compilation
-        task_context.send_intermediate_update("Compiling final report...").await?;
+        progress.send_update("Compiling final report...").await?;
 
         let report = compile_report(llm)
             .run(&analysis, &charts)
@@ -928,7 +929,6 @@ use radkit::runtime::Runtime;
 
 pub fn configure_agent() -> AgentDefinition {
     Agent::builder()
-        .with_id("my-agent-v1")
         .with_name("My A2A Agent")
         .with_description("An intelligent agent with multiple skills")
         // Skills automatically provide metadata from #[skill] macro
@@ -973,10 +973,10 @@ pub enum OnRequestResult {
 
 ```rust
 // Always maps to A2A TaskState::Working with final=false
-task_context.send_intermediate_update("Processing...").await?;
+progress.send_update("Processing...").await?;
 
 // Always creates A2A TaskArtifactUpdateEvent
-task_context.send_partial_artifact(artifact).await?;
+progress.send_artifact(artifact).await?;
 ```
 
 **Guarantee:** You cannot accidentally send terminal states or mark intermediate updates as final.
@@ -1008,10 +1008,10 @@ The framework automatically converts between radkit types and A2A protocol types
 
 ```rust
 // ✅ Allowed: Send intermediate updates during execution
-task_context.send_intermediate_update("Working...").await?;
+progress.send_update("Working...").await?;
 
 // ✅ Allowed: Send partial artifacts any time
-task_context.send_partial_artifact(artifact).await?;
+progress.send_artifact(artifact).await?;
 
 // ✅ Allowed: Return terminal state with final artifacts
 Ok(OnRequestResult::Completed {
@@ -1044,11 +1044,11 @@ Ok(OnRequestResult::InvalidState { ... })  // Compilation error!
 
 **2. Restricted Method APIs**
 
-Methods like `task_context.send_intermediate_update()` are internally hardcoded to use `TaskState::Working` with `final=false`. The API doesn't expose parameters that would allow setting invalid combinations:
+Methods like `progress.send_update()` are internally hardcoded to use `TaskState::Working` with `final=false`. The API doesn't expose parameters that would allow setting invalid combinations:
 
 ```rust
 // Implementation detail (in radkit internals):
-pub async fn send_intermediate_update(&mut self, message: impl Into<Content>) -> Result<()> {
+pub async fn send_update(&self, message: impl Into<Content>) -> Result<()> {
     // Always sends TaskState::Working with final=false
     // No way for developers to override this behavior
 }
@@ -1056,11 +1056,11 @@ pub async fn send_intermediate_update(&mut self, message: impl Into<Content>) ->
 
 **3. Separation of Concerns via Return Types**
 
-Intermediate updates go through `task_context` methods, while final states are only set via return values from `on_request()` and `on_input_received()`. This architectural separation, enforced by Rust's type system, makes it impossible to accidentally mark an intermediate update as final or send a terminal state mid-execution:
+Intermediate updates go through `ProgressSender` methods, while final states are only set via return values from `on_request()` and `on_input_received()`. This architectural separation, enforced by Rust's type system, makes it impossible to accidentally mark an intermediate update as final or send a terminal state mid-execution:
 
 ```rust
-// During execution: Only intermediate methods available
-task_context.send_intermediate_update("Working...").await?;  // Always non-final
+// During execution: Only intermediate methods available via ProgressSender
+progress.send_update("Working...").await?;  // Always non-final
 
 // At completion: Only way to set final state is via return
 Ok(OnRequestResult::Completed { ... })  // Compiler ensures this ends execution
