@@ -20,9 +20,10 @@ use super::structured_parser::{build_structured_output_instructions, extract_str
 use crate::errors::{AgentError, AgentResult};
 use crate::models::LLMOutputTrait;
 use crate::models::{BaseLlm, ContentPart, Event, Thread};
+use crate::runtime::context::AuthContext;
 use crate::tools::{
-    BaseTool, BaseToolset, CombinedToolset, DefaultExecutionState, SimpleToolset, ToolContext,
-    ToolResponse,
+    BaseTool, BaseToolset, CombinedToolset, DefaultExecutionState, ExecutionState, SimpleToolset,
+    ToolContext, ToolResponse,
 };
 use crate::{compat::MaybeSend, compat::MaybeSync};
 
@@ -66,6 +67,7 @@ pub struct LlmWorker<T> {
     system_instructions: Option<String>,
     toolset: Option<Arc<dyn BaseToolset>>,
     max_iterations: usize,
+    auth_context: Option<AuthContext>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -252,6 +254,16 @@ where
         };
 
         let execution_state = DefaultExecutionState::new();
+
+        // Auto-wire auth context into execution state if configured
+        if let Some(ref auth_ctx) = self.auth_context {
+            let auth_value = serde_json::to_value(auth_ctx).map_err(|e| AgentError::Internal {
+                component: "llm_worker".to_string(),
+                reason: format!("Failed to serialize auth context: {e}"),
+            })?;
+            execution_state.set_state("auth_context", auth_value);
+        }
+
         let tool_context = ToolContext::builder()
             .with_state(&execution_state)
             .build()
@@ -417,6 +429,7 @@ pub struct LlmWorkerBuilder<T> {
     tools: Vec<Box<dyn BaseTool>>,
     toolsets: Vec<Arc<dyn BaseToolset>>,
     max_iterations: usize,
+    auth_context: Option<AuthContext>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -445,6 +458,7 @@ where
             tools: Vec::new(),
             toolsets: Vec::new(),
             max_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
+            auth_context: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -566,6 +580,35 @@ where
         self
     }
 
+    /// Sets the authentication context for tool execution.
+    ///
+    /// When set, the auth context will be automatically injected into the
+    /// execution state under the key `"auth_context"`, making it available
+    /// to memory tools and other tools that require user/app context.
+    ///
+    /// # Arguments
+    ///
+    /// * `auth_context` - The authentication context to inject
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let auth = AuthContext {
+    ///     app_name: "my-app".to_string(),
+    ///     user_name: "alice".to_string(),
+    /// };
+    ///
+    /// let worker = LlmWorker::builder(my_llm)
+    ///     .with_auth_context(auth)
+    ///     .with_toolset(runtime.memory_tools().into())
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn with_auth_context(mut self, auth_context: AuthContext) -> Self {
+        self.auth_context = Some(auth_context);
+        self
+    }
+
     /// Adds multiple toolsets at once.
     ///
     /// This is a convenience method for adding multiple toolsets in a single call.
@@ -656,6 +699,7 @@ where
             system_instructions: self.system_instructions,
             toolset: combined_toolset,
             max_iterations: self.max_iterations,
+            auth_context: self.auth_context,
             _phantom: std::marker::PhantomData,
         }
     }
