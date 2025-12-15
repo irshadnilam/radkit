@@ -21,11 +21,11 @@ While the library provides abstractions, developers can always drop down to lowe
 
 ## Features
 
-- 🤝 **A2A Protocol First** - Native support for Agent-to-Agent communication standard
-- 🔄 **Unified LLM Interface** - Single API for Anthropic, OpenAI, Gemini, Grok, DeepSeek
-- 🛠️ **Tool Execution** - Automatic tool calling with multi-turn loops and state management
-- 📝 **Structured Outputs** - Type-safe response deserialization with JSON Schema
-- 🔒 **Type Safety** - Leverage Rust's type system for reliability and correctness
+- **A2A Protocol First** - Native support for Agent-to-Agent communication standard
+- **Unified LLM Interface** - Single API for Anthropic, OpenAI, Gemini, Grok, DeepSeek
+- **Tool Execution** - Automatic tool calling with multi-turn loops and state management
+- **Structured Outputs** - Type-safe response deserialization with JSON Schema
+- **Type Safety** - Leverage Rust's type system for reliability and correctness
 
 ---
 
@@ -39,7 +39,7 @@ For using core types and helpers like `LlmFunction` and `LlmWorker` without the 
 
 ```toml
 [dependencies]
-radkit = "0.0.3"
+radkit = "0.0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "process", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,7 +52,7 @@ To include the runtime server handle and enable the full A2A agent server capabi
 
 ```toml
 [dependencies]
-radkit = { version = "0.0.3", features = ["runtime"] }
+radkit = { version = "0.0.4", features = ["runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "process", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

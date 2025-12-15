@@ -22,14 +22,14 @@ use radkit::runtime::Runtime;
 # pub struct ProfileExtractorSkill;
 # #[async_trait]
 # impl SkillHandler for ProfileExtractorSkill {
-#     async fn on_request(&self, _: &mut TaskContext, _: &Context, _: &dyn Runtime, _: Content) -> AgentResult<OnRequestResult> {
+#     async fn on_request(&self, state: &mut State, progress: &ProgressSender, runtime: &dyn Runtime, content: Content) -> AgentResult<OnRequestResult> {
 #         unimplemented!()
 #     }
 # }
 # pub struct ReportGeneratorSkill;
 # #[async_trait]
 # impl SkillHandler for ReportGeneratorSkill {
-#     async fn on_request(&self, _: &mut TaskContext, _: &Context, _: &dyn Runtime, _: Content) -> AgentResult<OnRequestResult> {
+#     async fn on_request(&self, state: &mut State, progress: &ProgressSender, runtime: &dyn Runtime, content: Content) -> AgentResult<OnRequestResult> {
 #         unimplemented!()
 #     }
 # }
