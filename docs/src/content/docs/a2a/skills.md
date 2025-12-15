@@ -74,7 +74,7 @@ impl SkillHandler for ProfileExtractorSkill {
         state: &mut State,
         progress: &ProgressSender,
         runtime: &dyn Runtime,
-        content: Content,
+        content: Content
     ) -> AgentResult<OnRequestResult> {
         // 1. Get the LLM from the runtime
         let llm = runtime.llm_provider().default_llm()?;
