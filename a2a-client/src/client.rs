@@ -55,6 +55,27 @@ enum JsonRpcResponse<T> {
     Error(JSONRPCErrorResponse),
 }
 
+/// Default HTTP request timeout applied on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Builds a `reqwest::Client` with the default 30-second timeout.
+/// On WASM, `reqwest::ClientBuilder` does not support `timeout`, so we fall
+/// back to a plain default client.
+fn default_client() -> Client {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Client::builder()
+            .timeout(DEFAULT_TIMEOUT)
+            .build()
+            .unwrap_or_default()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Client::new()
+    }
+}
+
 fn parse_agent_card_bytes(bytes: &[u8]) -> A2AResult<v1::AgentCard> {
     serde_json::from_slice(bytes).map_err(|error| A2AError::SerializationError {
         message: format!("Failed to parse agent card: {error}"),
@@ -94,18 +115,16 @@ fn resolve_endpoints(agent_card: &v1::AgentCard) -> A2AResult<(Option<String>, O
     Ok((rpc_endpoint_url, http_json_endpoint_url))
 }
 
-fn timestamp_to_rfc3339<T>(value: T) -> A2AResult<String>
-where
-    T: Serialize,
-{
-    match serde_json::to_value(value).map_err(|error| A2AError::SerializationError {
-        message: format!("Failed to serialize timestamp: {error}"),
-    })? {
-        serde_json::Value::String(value) => Ok(value),
-        other => Err(A2AError::SerializationError {
-            message: format!("Expected RFC3339 timestamp string, got {other}"),
-        }),
-    }
+/// Converts a `pbjson_types::Timestamp` to an RFC 3339 string for use as a query parameter.
+fn timestamp_to_rfc3339(ts: pbjson_types::Timestamp) -> A2AResult<String> {
+    chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.cast_unsigned())
+        .map(|dt| dt.to_rfc3339())
+        .ok_or_else(|| A2AError::InvalidParameter {
+            message: format!(
+                "Invalid timestamp: seconds={} nanos={}",
+                ts.seconds, ts.nanos
+            ),
+        })
 }
 
 fn task_state_query_value(value: i32) -> A2AResult<Option<String>> {
@@ -394,7 +413,7 @@ impl A2AClient {
     /// Returns an error if the agent card cannot be fetched, parsed, or does not advertise
     /// a supported `JSONRPC` or `HTTP+JSON` interface.
     pub async fn from_card_url(base_url: impl AsRef<str>) -> A2AResult<Self> {
-        Self::from_card_url_with_client(base_url, Client::new()).await
+        Self::from_card_url_with_client(base_url, default_client()).await
     }
 
     /// Create a new A2A client from an agent card URL with a custom HTTP client
@@ -491,7 +510,7 @@ impl A2AClient {
     ///
     /// Returns an error if the agent card does not advertise a supported `JSONRPC` or `HTTP+JSON` interface.
     pub fn from_card(agent_card: v1::AgentCard) -> A2AResult<Self> {
-        Self::from_card_with_client(agent_card, Client::new())
+        Self::from_card_with_client(agent_card, default_client())
     }
 
     /// Create a new A2A client from an agent card with a custom HTTP client
@@ -648,6 +667,36 @@ impl A2AClient {
         parse_agent_card_bytes(&bytes)
     }
 
+    /// Fetch the extended agent card if the agent advertises one.
+    ///
+    /// Checks `capabilities.extended_agent_card` on the cached public card first.
+    /// If the agent does not advertise an extended card, returns `None` immediately
+    /// without making a network request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the network request fails or the response cannot be parsed.
+    pub async fn fetch_extended_agent_card_if_available(&self) -> A2AResult<Option<v1::AgentCard>> {
+        let advertises_extended = self
+            .agent_card
+            .capabilities
+            .as_ref()
+            .and_then(|c| c.extended_agent_card)
+            .unwrap_or(false);
+
+        if !advertises_extended {
+            return Ok(None);
+        }
+
+        let card = self
+            .get_extended_agent_card(v1::GetExtendedAgentCardRequest {
+                tenant: String::new(),
+            })
+            .await?;
+
+        Ok(Some(card))
+    }
+
     /// Get the next request ID
     fn next_request_id(&self) -> JSONRPCId {
         let id = self.request_id_counter.fetch_add(1, Ordering::SeqCst);
@@ -666,7 +715,7 @@ impl A2AClient {
         self.http_json_endpoint_url.as_deref()
     }
 
-    fn build_http_json_url(&self, tenant: &str, segments: &[&str]) -> A2AResult<String> {
+    fn build_http_json_url(&self, segments: &[&str]) -> A2AResult<String> {
         let base = self
             .http_json_base_url()
             .ok_or_else(|| A2AError::InvalidParameter {
@@ -681,14 +730,20 @@ impl A2AClient {
                     .map_err(|()| A2AError::InvalidParameter {
                         message: format!("HTTP+JSON base URL `{base}` cannot accept path segments"),
                     })?;
-            if !tenant.is_empty() {
-                path_segments.push(tenant);
-            }
             for segment in segments {
                 path_segments.push(segment);
             }
         }
         Ok(url.to_string())
+    }
+
+    /// Applies auth, tracing headers, and the optional `X-A2A-Tenant` header to a request.
+    fn prepare_request_with_tenant(&self, request: RequestBuilder, tenant: &str) -> RequestBuilder {
+        let mut req = self.prepare_request(request);
+        if !tenant.is_empty() {
+            req = req.header("X-A2A-Tenant", tenant);
+        }
+        req
     }
 
     fn prepare_request(&self, mut request: RequestBuilder) -> RequestBuilder {
@@ -707,17 +762,18 @@ impl A2AClient {
         &self,
         request: RequestBuilder,
         context: &str,
+        tenant: &str,
     ) -> A2AResult<TResponse>
     where
         TResponse: for<'de> Deserialize<'de>,
     {
-        let response =
-            self.prepare_request(request)
-                .send()
-                .await
-                .map_err(|e| A2AError::NetworkError {
-                    message: format!("Failed to send {context} request: {e}"),
-                })?;
+        let response = self
+            .prepare_request_with_tenant(request, tenant)
+            .send()
+            .await
+            .map_err(|e| A2AError::NetworkError {
+                message: format!("Failed to send {context} request: {e}"),
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -733,6 +789,22 @@ impl A2AClient {
             });
         }
 
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+
+        if !content_type.starts_with("application/json") {
+            let body = response.text().await.unwrap_or_default();
+            return Err(A2AError::SerializationError {
+                message: format!(
+                    "Expected Content-Type application/json for {context}, got '{content_type}': {body}"
+                ),
+            });
+        }
+
         response
             .json()
             .await
@@ -745,14 +817,15 @@ impl A2AClient {
         &self,
         request: RequestBuilder,
         context: &str,
+        tenant: &str,
     ) -> A2AResult<reqwest::Response> {
-        let response =
-            self.prepare_request(request)
-                .send()
-                .await
-                .map_err(|e| A2AError::NetworkError {
-                    message: format!("Failed to send {context} request: {e}"),
-                })?;
+        let response = self
+            .prepare_request_with_tenant(request, tenant)
+            .send()
+            .await
+            .map_err(|e| A2AError::NetworkError {
+                message: format!("Failed to send {context} request: {e}"),
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -771,8 +844,7 @@ impl A2AClient {
         if !content_type.starts_with("text/event-stream") {
             return Err(A2AError::NetworkError {
                 message: format!(
-                    "Invalid response Content-Type for SSE stream. Expected 'text/event-stream', got '{}'",
-                    content_type
+                    "Invalid response Content-Type for SSE stream. Expected 'text/event-stream', got '{content_type}'"
                 ),
             });
         }
@@ -837,7 +909,6 @@ impl A2AClient {
                 })?;
 
         if !response.status().is_success() {
-            // Try to parse error response
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             if let Ok(error_json) = serde_json::from_str::<JSONRPCErrorResponse>(&error_text) {
@@ -845,6 +916,22 @@ impl A2AClient {
             }
             return Err(A2AError::NetworkError {
                 message: format!("HTTP error {}: {}", status, error_text),
+            });
+        }
+
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+
+        if !content_type.starts_with("application/json") {
+            let body = response.text().await.unwrap_or_default();
+            return Err(A2AError::SerializationError {
+                message: format!(
+                    "Expected Content-Type application/json for {method}, got '{content_type}': {body}"
+                ),
             });
         }
 
@@ -856,16 +943,18 @@ impl A2AClient {
                     message: format!("Failed to parse {} response: {}", method, e),
                 })?;
 
-        // Validate response ID matches request ID
+        // Validate that the response ID matches the request ID per JSON-RPC §5.
         if let JsonRpcResponse::Success {
-            id: Some(resp_id), ..
+            id: Some(resp_id),
+            ..
         } = &json_response
             && resp_id != &request_id
         {
-            eprintln!(
-                "WARNING: RPC response ID mismatch for method {}. Expected {:?}, got {:?}",
-                method, request_id, resp_id
-            );
+            return Err(A2AError::InvalidParameter {
+                message: format!(
+                    "JSON-RPC response ID mismatch for method '{method}': expected {request_id:?}, got {resp_id:?}"
+                ),
+            });
         }
 
         Ok(json_response)
@@ -920,7 +1009,8 @@ impl A2AClient {
         request: v1::SendMessageRequest,
     ) -> A2AResult<v1::SendMessageResponse> {
         if self.http_json_base_url().is_some() {
-            let url = self.build_http_json_url(&request.tenant, &["message:send"])?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&["message:send"])?;
             return self
                 .send_json_request(
                     self.client
@@ -929,6 +1019,7 @@ impl A2AClient {
                         .header("Accept", "application/json")
                         .json(&request),
                     "SendMessage",
+                    &tenant,
                 )
                 .await;
         }
@@ -944,7 +1035,8 @@ impl A2AClient {
         self.ensure_streaming_enabled("SendStreamingMessage")?;
 
         if self.http_json_base_url().is_some() {
-            let url = self.build_http_json_url(&request.tenant, &["message:stream"])?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&["message:stream"])?;
             let response = self
                 .start_sse_request(
                     self.client
@@ -953,6 +1045,7 @@ impl A2AClient {
                         .header("Accept", "text/event-stream")
                         .json(&request),
                     "SendStreamingMessage",
+                    &tenant,
                 )
                 .await?;
             return Ok(Box::pin(SseParser::new(
@@ -975,6 +1068,7 @@ impl A2AClient {
                     .header("Accept", "text/event-stream")
                     .json(&rpc_request),
                 "SendStreamingMessage",
+                "",
             )
             .await?;
 
@@ -993,7 +1087,8 @@ impl A2AClient {
                 history_length: Option<i32>,
             }
 
-            let url = self.build_http_json_url(&request.tenant, &["tasks", &request.id])?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&["tasks", &request.id])?;
             return self
                 .send_json_request(
                     self.client
@@ -1003,6 +1098,7 @@ impl A2AClient {
                             history_length: request.history_length,
                         }),
                     "GetTask",
+                    &tenant,
                 )
                 .await;
         }
@@ -1037,7 +1133,8 @@ impl A2AClient {
                 include_artifacts: Option<bool>,
             }
 
-            let url = self.build_http_json_url(&request.tenant, &["tasks"])?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&["tasks"])?;
             let status = task_state_query_value(request.status)?;
             let status_timestamp_after = request
                 .status_timestamp_after
@@ -1058,6 +1155,7 @@ impl A2AClient {
                             include_artifacts: request.include_artifacts,
                         }),
                     "ListTasks",
+                    &tenant,
                 )
                 .await;
         }
@@ -1069,7 +1167,8 @@ impl A2AClient {
     pub async fn cancel_task(&self, request: v1::CancelTaskRequest) -> A2AResult<v1::Task> {
         if self.http_json_base_url().is_some() {
             let cancel_segment = format!("{}:cancel", request.id);
-            let url = self.build_http_json_url(&request.tenant, &["tasks", &cancel_segment])?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&["tasks", &cancel_segment])?;
             return self
                 .send_json_request(
                     self.client
@@ -1078,6 +1177,7 @@ impl A2AClient {
                         .header("Accept", "application/json")
                         .json(&request),
                     "CancelTask",
+                    &tenant,
                 )
                 .await;
         }
@@ -1094,11 +1194,13 @@ impl A2AClient {
 
         if self.http_json_base_url().is_some() {
             let subscribe_segment = format!("{}:subscribe", request.id);
-            let url = self.build_http_json_url(&request.tenant, &["tasks", &subscribe_segment])?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&["tasks", &subscribe_segment])?;
             let response = self
                 .start_sse_request(
                     self.client.get(url).header("Accept", "text/event-stream"),
                     "SubscribeToTask",
+                    &tenant,
                 )
                 .await?;
             return Ok(Box::pin(SseParser::new(
@@ -1121,6 +1223,7 @@ impl A2AClient {
                     .header("Accept", "text/event-stream")
                     .json(&rpc_request),
                 "SubscribeToTask",
+                "",
             )
             .await?;
 
@@ -1136,11 +1239,13 @@ impl A2AClient {
         request: v1::GetExtendedAgentCardRequest,
     ) -> A2AResult<v1::AgentCard> {
         if self.http_json_base_url().is_some() {
-            let url = self.build_http_json_url(&request.tenant, &["extendedAgentCard"])?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&["extendedAgentCard"])?;
             return self
                 .send_json_request(
                     self.client.get(url).header("Accept", "application/json"),
                     "GetExtendedAgentCard",
+                    &tenant,
                 )
                 .await;
         }
@@ -1159,10 +1264,9 @@ impl A2AClient {
         self.ensure_push_notifications_enabled()?;
 
         if self.http_json_base_url().is_some() {
-            let url = self.build_http_json_url(
-                &request.tenant,
-                &["tasks", &request.task_id, "pushNotificationConfigs"],
-            )?;
+            let tenant = request.tenant.clone();
+            let url =
+                self.build_http_json_url(&["tasks", &request.task_id, "pushNotificationConfigs"])?;
             return self
                 .send_json_request(
                     self.client
@@ -1171,6 +1275,7 @@ impl A2AClient {
                         .header("Accept", "application/json")
                         .json(&request),
                     "CreateTaskPushNotificationConfig",
+                    &tenant,
                 )
                 .await;
         }
@@ -1187,19 +1292,18 @@ impl A2AClient {
         request: v1::GetTaskPushNotificationConfigRequest,
     ) -> A2AResult<v1::TaskPushNotificationConfig> {
         if self.http_json_base_url().is_some() {
-            let url = self.build_http_json_url(
-                &request.tenant,
-                &[
-                    "tasks",
-                    &request.task_id,
-                    "pushNotificationConfigs",
-                    &request.id,
-                ],
-            )?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&[
+                "tasks",
+                &request.task_id,
+                "pushNotificationConfigs",
+                &request.id,
+            ])?;
             return self
                 .send_json_request(
                     self.client.get(url).header("Accept", "application/json"),
                     "GetTaskPushNotificationConfig",
+                    &tenant,
                 )
                 .await;
         }
@@ -1224,10 +1328,9 @@ impl A2AClient {
                 page_token: String,
             }
 
-            let url = self.build_http_json_url(
-                &request.tenant,
-                &["tasks", &request.task_id, "pushNotificationConfigs"],
-            )?;
+            let tenant = request.tenant.clone();
+            let url =
+                self.build_http_json_url(&["tasks", &request.task_id, "pushNotificationConfigs"])?;
             return self
                 .send_json_request(
                     self.client
@@ -1238,6 +1341,7 @@ impl A2AClient {
                             page_token: request.page_token,
                         }),
                     "ListTaskPushNotificationConfigs",
+                    &tenant,
                 )
                 .await;
         }
@@ -1254,24 +1358,26 @@ impl A2AClient {
         request: v1::DeleteTaskPushNotificationConfigRequest,
     ) -> A2AResult<()> {
         if self.http_json_base_url().is_some() {
-            let url = self.build_http_json_url(
-                &request.tenant,
-                &[
-                    "tasks",
-                    &request.task_id,
-                    "pushNotificationConfigs",
-                    &request.id,
-                ],
-            )?;
+            let tenant = request.tenant.clone();
+            let url = self.build_http_json_url(&[
+                "tasks",
+                &request.task_id,
+                "pushNotificationConfigs",
+                &request.id,
+            ])?;
+            // DELETE returns an empty body; send the request and only check for errors.
             let _: serde_json::Value = self
                 .send_json_request(
                     self.client.delete(url).header("Accept", "application/json"),
                     "DeleteTaskPushNotificationConfig",
+                    &tenant,
                 )
                 .await?;
             return Ok(());
         }
 
+        // JSON-RPC: unwrap_rpc_response propagates any error response,
+        // including those returned with a 2xx HTTP status.
         let _: serde_json::Value = self.unwrap_rpc_response(
             self.post_rpc_request("DeleteTaskPushNotificationConfig", request)
                 .await?,
@@ -1545,5 +1651,103 @@ mod tests {
             client.http_json_endpoint_url.as_deref(),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn build_http_json_url_does_not_include_tenant_in_path() {
+        let client = A2AClient::from_card(v1::AgentCard {
+            name: "Test".to_string(),
+            description: "desc".to_string(),
+            supported_interfaces: vec![v1::AgentInterface {
+                url: "https://agent.example.com".to_string(),
+                protocol_binding: "HTTP+JSON".to_string(),
+                tenant: String::new(),
+                protocol_version: "1.0".to_string(),
+            }],
+            provider: None,
+            version: "1.0.0".to_string(),
+            documentation_url: None,
+            capabilities: Some(v1::AgentCapabilities::default()),
+            security_schemes: std::collections::HashMap::new(),
+            security_requirements: Vec::new(),
+            default_input_modes: vec![],
+            default_output_modes: vec![],
+            skills: vec![],
+            signatures: vec![],
+            icon_url: None,
+        })
+        .expect("valid card");
+
+        let url = client
+            .build_http_json_url(&["tasks", "task-1"])
+            .expect("url");
+        assert_eq!(url, "https://agent.example.com/tasks/task-1");
+
+        let url_with_action = client
+            .build_http_json_url(&["tasks", "task-1:cancel"])
+            .expect("url");
+        assert_eq!(
+            url_with_action,
+            "https://agent.example.com/tasks/task-1:cancel"
+        );
+    }
+
+    #[test]
+    fn timestamp_to_rfc3339_converts_correctly() {
+        // 2024-01-15 12:00:00 UTC = 1705320000
+        let ts = pbjson_types::Timestamp {
+            seconds: 1_705_320_000,
+            nanos: 0,
+        };
+        let result = timestamp_to_rfc3339(ts).expect("valid timestamp");
+        assert!(result.starts_with("2024-01-15"), "got: {result}");
+        assert!(result.contains("12:00:00"), "got: {result}");
+    }
+
+    #[test]
+    fn timestamp_to_rfc3339_rejects_invalid_timestamp() {
+        let ts = pbjson_types::Timestamp {
+            seconds: i64::MAX,
+            nanos: i32::MAX,
+        };
+        assert!(timestamp_to_rfc3339(ts).is_err());
+    }
+
+    #[test]
+    fn fetch_extended_card_returns_none_when_not_advertised() {
+        let client = A2AClient::from_card(v1::AgentCard {
+            name: "Test".to_string(),
+            description: "desc".to_string(),
+            supported_interfaces: vec![v1::AgentInterface {
+                url: "https://example.com/rpc".to_string(),
+                protocol_binding: "JSONRPC".to_string(),
+                tenant: String::new(),
+                protocol_version: "1.0".to_string(),
+            }],
+            provider: None,
+            version: "1.0.0".to_string(),
+            documentation_url: None,
+            // extended_agent_card not set / false
+            capabilities: Some(v1::AgentCapabilities {
+                streaming: Some(true),
+                push_notifications: Some(false),
+                extensions: Vec::new(),
+                extended_agent_card: Some(false),
+            }),
+            security_schemes: std::collections::HashMap::new(),
+            security_requirements: Vec::new(),
+            default_input_modes: vec![],
+            default_output_modes: vec![],
+            skills: vec![],
+            signatures: vec![],
+            icon_url: None,
+        })
+        .expect("valid card");
+
+        // No network call — should return None immediately.
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(client.fetch_extended_agent_card_if_available());
+        assert!(matches!(result, Ok(None)));
     }
 }
