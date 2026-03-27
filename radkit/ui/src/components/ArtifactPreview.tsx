@@ -1,9 +1,45 @@
-import type { Artifact } from "@a2a-js/sdk";
+import type { Artifact, Part } from "../types/a2a_v1";
 import { useState } from "react";
 
 interface ArtifactPreviewProps {
   artifact: Artifact;
   onDownload?: () => void;
+}
+
+function getPartContent(
+  part: Part
+): { type: "text" | "json" | "image" | "file"; content?: string; mimeType?: string } | null {
+  if (part.text != null) return { type: "text", content: part.text };
+
+  if (part.data != null) {
+    return { type: "json", content: JSON.stringify(part.data, null, 2) };
+  }
+
+  if (part.raw != null) {
+    // base64-encoded bytes
+    const mimeType = part.mediaType ?? "application/octet-stream";
+    if (mimeType.startsWith("image/")) {
+      return { type: "image", content: `data:${mimeType};base64,${part.raw}`, mimeType };
+    }
+    if (mimeType === "application/json" || mimeType === "text/plain") {
+      try {
+        return { type: mimeType === "application/json" ? "json" : "text", content: atob(part.raw) };
+      } catch {
+        return { type: "text", content: part.raw };
+      }
+    }
+    return { type: "file", mimeType };
+  }
+
+  if (part.url != null) {
+    const mimeType = part.mediaType ?? "application/octet-stream";
+    if (mimeType.startsWith("image/")) {
+      return { type: "image", content: part.url, mimeType };
+    }
+    return { type: "file", mimeType };
+  }
+
+  return null;
 }
 
 export default function ArtifactPreview({ artifact, onDownload }: ArtifactPreviewProps) {
@@ -15,48 +51,30 @@ export default function ArtifactPreview({ artifact, onDownload }: ArtifactPrevie
       return;
     }
 
-    // Try to download from artifact data directly
     const part = artifact.parts?.[0];
     if (!part) return;
 
     let blob: Blob | null = null;
-    let filename = artifact.name || "artifact";
+    const filename = part.filename ?? artifact.name ?? "artifact";
+    const mimeType = part.mediaType ?? "application/octet-stream";
 
-    if ("file" in part && part.file) {
-      const file = part.file;
-      const mimeType = ("mimeType" in file && file.mimeType) || "application/octet-stream";
-
-      if ("bytes" in file && file.bytes) {
-        // Decode base64 bytes
-        try {
-          const binaryString = atob(file.bytes);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-          blob = new Blob([bytes], { type: mimeType });
-        } catch (e) {
-          console.error("Failed to decode artifact bytes:", e);
-          return;
-        }
-      } else if ("uri" in file && file.uri) {
-        // For URI, open in new tab
-        window.open(file.uri, "_blank");
+    if (part.raw != null) {
+      try {
+        const binary = atob(part.raw);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        blob = new Blob([bytes], { type: mimeType });
+      } catch (e) {
+        console.error("Failed to decode raw bytes:", e);
         return;
       }
-
-      if ("name" in file && file.name) {
-        filename = file.name;
-      }
-    } else if ("data" in part && part.data) {
-      // Download JSON data
-      const jsonString = JSON.stringify(part.data, null, 2);
-      blob = new Blob([jsonString], { type: "application/json" });
-      filename = filename.endsWith(".json") ? filename : `${filename}.json`;
-    } else if ("text" in part && part.text) {
-      // Download text
+    } else if (part.url != null) {
+      window.open(part.url, "_blank");
+      return;
+    } else if (part.data != null) {
+      blob = new Blob([JSON.stringify(part.data, null, 2)], { type: "application/json" });
+    } else if (part.text != null) {
       blob = new Blob([part.text], { type: "text/plain" });
-      filename = filename.endsWith(".txt") ? filename : `${filename}.txt`;
     }
 
     if (blob) {
@@ -71,61 +89,13 @@ export default function ArtifactPreview({ artifact, onDownload }: ArtifactPrevie
     }
   };
 
-  // Extract content from artifact parts
-  const getArtifactContent = () => {
-    if (!artifact.parts || artifact.parts.length === 0) {
-      return null;
-    }
-
-    const part = artifact.parts[0];
-
-    if ("text" in part && part.text) {
-      return { type: "text", content: part.text };
-    }
-
-    if ("data" in part && part.data) {
-      return { type: "json", content: JSON.stringify(part.data, null, 2) };
-    }
-
-    if ("file" in part && part.file) {
-      const file = part.file;
-      if ("mimeType" in file) {
-        const mimeType = file.mimeType || "application/octet-stream";
-
-        if (mimeType.startsWith("image/")) {
-          let src = "";
-          if ("bytes" in file && file.bytes) {
-            src = `data:${mimeType};base64,${file.bytes}`;
-          } else if ("uri" in file && file.uri) {
-            src = file.uri;
-          }
-          return { type: "image", content: src, mimeType };
-        }
-
-        if (mimeType === "application/json" || mimeType === "text/plain") {
-          if ("bytes" in file && file.bytes) {
-            try {
-              const decoded = atob(file.bytes);
-              return { type: mimeType === "application/json" ? "json" : "text", content: decoded };
-            } catch (e) {
-              return { type: "text", content: file.bytes };
-            }
-          }
-        }
-
-        return { type: "file", mimeType };
-      }
-    }
-
-    return null;
-  };
-
-  const content = getArtifactContent();
+  const part = artifact.parts?.[0];
+  const content = part ? getPartContent(part) : null;
 
   if (!content) {
     return (
       <div className="rounded-xl bg-slate-800/50 p-4 text-slate-400">
-        <p className="text-sm">No preview available for this artifact</p>
+        <p className="text-sm">No preview available</p>
         {artifact.name && <p className="text-xs text-slate-500 mt-1">{artifact.name}</p>}
       </div>
     );
@@ -169,19 +139,27 @@ export default function ArtifactPreview({ artifact, onDownload }: ArtifactPrevie
         {content.type === "image" && content.content && (
           <img
             src={content.content}
-            alt={artifact.name || "Artifact image"}
+            alt={artifact.name ?? "Artifact image"}
             className="max-w-full h-auto rounded-lg"
           />
         )}
 
         {content.type === "json" && (
-          <pre className={`text-xs text-slate-300 overflow-x-auto bg-slate-900/50 rounded-lg p-3 ${expanded ? "" : "max-h-32 overflow-y-hidden"}`}>
+          <pre
+            className={`text-xs text-slate-300 overflow-x-auto bg-slate-900/50 rounded-lg p-3 ${
+              expanded ? "" : "max-h-32 overflow-y-hidden"
+            }`}
+          >
             {content.content}
           </pre>
         )}
 
         {content.type === "text" && (
-          <div className={`text-sm text-slate-300 whitespace-pre-wrap ${expanded ? "" : "max-h-32 overflow-y-hidden line-clamp-6"}`}>
+          <div
+            className={`text-sm text-slate-300 whitespace-pre-wrap ${
+              expanded ? "" : "max-h-32 overflow-y-hidden line-clamp-6"
+            }`}
+          >
             {content.content}
           </div>
         )}

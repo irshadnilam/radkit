@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { Artifact } from "@a2a-js/sdk";
+import type { Artifact } from "../types/a2a_v1";
 import ArtifactPreview from "./ArtifactPreview";
 
 export type ConsoleEntryType = "user" | "agent" | "status" | "artifact" | "task" | "negotiation";
