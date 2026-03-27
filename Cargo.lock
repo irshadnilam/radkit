@@ -4,14 +4,16 @@ version = 4
 
 [[package]]
 name = "a2a-client"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "a2a-types",
  "bytes",
+ "chrono",
  "futures-core",
  "futures-util",
  "getrandom 0.3.4",
  "opentelemetry",
+ "pbjson-types",
  "reqwest",
  "serde",
  "serde_json",
